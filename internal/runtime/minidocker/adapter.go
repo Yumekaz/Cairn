@@ -3,6 +3,7 @@ package minidocker
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -161,4 +162,18 @@ func (a *MiniDockerAdapter) InspectContainer(ctx context.Context, id string) (*r
 		IPAddress: c.Network.IP,
 		Ports:     ports,
 	}, nil
+}
+
+// StreamLogs returns a stream of container logs from Mini-Docker.
+func (a *MiniDockerAdapter) StreamLogs(ctx context.Context, id string, follow bool, tail int) (io.ReadCloser, error) {
+	path := fmt.Sprintf("/containers/%s/logs?follow=%t&timestamps=true", id, follow)
+	if tail > 0 {
+		path = fmt.Sprintf("%s&tail=%d", path, tail)
+	}
+
+	stream, err := a.client.Stream(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream logs from Mini-Docker for container %s: %w", id, err)
+	}
+	return stream, nil
 }

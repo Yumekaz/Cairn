@@ -99,3 +99,30 @@ func (c *DaemonClient) Post(ctx context.Context, path string, body interface{}, 
 func (c *DaemonClient) Delete(ctx context.Context, path string, target interface{}) error {
 	return c.execute(ctx, http.MethodDelete, path, nil, target)
 }
+
+// Stream performs a GET request to cairnd and returns the response body directly.
+func (c *DaemonClient) Stream(ctx context.Context, path string) (io.ReadCloser, error) {
+	url := "http://localhost" + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cairnd connection failed: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("daemon error (status %d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("daemon request failed with status: %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
+}

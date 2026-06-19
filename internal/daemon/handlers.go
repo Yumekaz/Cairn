@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,6 +28,18 @@ func (s *Server) setupRoutes() {
 			r.Post("/stop", s.handleStopService)
 			r.Post("/restart", s.handleRestartService)
 			r.Delete("/", s.handleRemoveService)
+			r.Get("/logs", s.handleServiceLogs)
+		})
+	})
+
+	s.router.Route("/volumes", func(r chi.Router) {
+		r.Get("/", s.handleListVolumes)
+		r.Post("/", s.handleCreateVolume)
+		r.Route("/{name}", func(r chi.Router) {
+			r.Get("/", s.handleGetVolume)
+			r.Post("/backups", s.handleCreateBackup)
+			r.Get("/backups", s.handleListBackups)
+			r.Post("/restore", s.handleRestoreBackup)
 		})
 	})
 
@@ -55,15 +70,48 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var totalBytes int64
+	if s.config.VolumeDir != "" {
+		totalBytes += getDirSize(s.config.VolumeDir)
+	}
+	if s.config.BackupDir != "" {
+		totalBytes += getDirSize(s.config.BackupDir)
+	}
+
 	status := api.DaemonStatus{
 		Uptime:         time.Since(s.startTime).Truncate(time.Second).String(),
 		Version:        "0.1.0",
 		ActiveServices: activeCount,
-		StorageUsage:   "N/A",
+		StorageUsage:   formatSize(totalBytes),
 	}
 
 	s.json(w, http.StatusOK, status)
 }
+
+func getDirSize(path string) int64 {
+	var size int64
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size
+}
+
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
 	services, err := s.store.ListServices()
@@ -150,6 +198,39 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.UpsertService(svc); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Ensure and register volumes in SQLite
+	for _, volConfig := range cfg.Volumes {
+		existingVol, err := s.store.GetVolumeByName(volConfig.Name)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existingVol == nil {
+			vol := &api.Volume{
+				ID:                uuid.New().String(),
+				Name:              volConfig.Name,
+				HostPath:          filepath.Join(s.config.VolumeDir, volConfig.Name),
+				AttachedServiceID: svc.ID,
+				MountPath:         volConfig.MountPath,
+				Status:            "active",
+				CreatedAt:         time.Now(),
+				UpdatedAt:         time.Now(),
+			}
+			if err := s.store.UpsertVolume(vol); err != nil {
+				s.error(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		} else {
+			existingVol.AttachedServiceID = svc.ID
+			existingVol.MountPath = volConfig.MountPath
+			existingVol.UpdatedAt = time.Now()
+			if err := s.store.UpsertVolume(existingVol); err != nil {
+				s.error(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 	}
 
 	// Record start event
@@ -418,4 +499,375 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.json(w, http.StatusOK, evts)
+}
+
+func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string `json:"name"`
+		MountPath string `json:"mount_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		s.error(w, http.StatusBadRequest, "volume name is required")
+		return
+	}
+
+	existing, err := s.store.GetVolumeByName(req.Name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing != nil {
+		s.error(w, http.StatusConflict, "volume already exists")
+		return
+	}
+
+	hostPath := filepath.Join(s.config.VolumeDir, req.Name)
+	if err := os.MkdirAll(hostPath, 0755); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to create host directory: "+err.Error())
+		return
+	}
+
+	vol := &api.Volume{
+		ID:        uuid.New().String(),
+		Name:      req.Name,
+		HostPath:  hostPath,
+		MountPath: req.MountPath,
+		Status:    "active",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := s.store.UpsertVolume(vol); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		Type:     events.VolumeCreated.String(),
+		Message:  fmt.Sprintf("Created volume %s", vol.Name),
+	})
+
+	s.json(w, http.StatusCreated, vol)
+}
+
+func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	vols, err := s.store.ListVolumes()
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.json(w, http.StatusOK, vols)
+}
+
+func (s *Server) handleGetVolume(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	vol, err := s.store.GetVolumeByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vol == nil {
+		s.error(w, http.StatusNotFound, "volume not found")
+		return
+	}
+	s.json(w, http.StatusOK, vol)
+}
+
+func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	vol, err := s.store.GetVolumeByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vol == nil {
+		s.error(w, http.StatusNotFound, "volume not found")
+		return
+	}
+
+	backupID := fmt.Sprintf("backup_%s_%s", vol.Name, time.Now().Format("20060102_150405"))
+	backupDir := filepath.Join(s.config.BackupDir, vol.Name)
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to create backup directory: "+err.Error())
+		return
+	}
+
+	backupPath := filepath.Join(backupDir, backupID+".tar.gz")
+
+	b := &api.Backup{
+		ID:         backupID,
+		VolumeID:   vol.ID,
+		BackupPath: backupPath,
+		Status:     "pending",
+		CreatedAt:  time.Now(),
+	}
+
+	if err := s.store.CreateBackup(b); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &b.ID,
+		Type:     events.BackupStarted.String(),
+		Message:  fmt.Sprintf("Started backup for volume %s (ID: %s)", vol.Name, backupID),
+	})
+
+	checksum, sizeBytes, err := CreateTarGz(vol.HostPath, backupPath)
+	if err != nil {
+		b.Status = "failed"
+		b.FailureReason = err.Error()
+		timeNow := time.Now()
+		b.CompletedAt = &timeNow
+		s.store.UpdateBackup(b)
+
+		s.store.CreateEvent(&api.Event{
+			ID:       uuid.New().String(),
+			VolumeID: &vol.ID,
+			BackupID: &b.ID,
+			Type:     events.BackupFailed.String(),
+			Message:  fmt.Sprintf("Backup failed for volume %s: %v", vol.Name, err),
+		})
+
+		s.error(w, http.StatusInternalServerError, "failed to create tarball: "+err.Error())
+		return
+	}
+
+	b.Status = "success"
+	b.SizeBytes = sizeBytes
+	b.Checksum = checksum
+	timeNow := time.Now()
+	b.CompletedAt = &timeNow
+	if err := s.store.UpdateBackup(b); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &b.ID,
+		Type:     events.BackupSucceeded.String(),
+		Message:  fmt.Sprintf("Backup completed successfully for volume %s (Size: %d bytes)", vol.Name, sizeBytes),
+	})
+
+	s.json(w, http.StatusCreated, b)
+}
+
+func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	vol, err := s.store.GetVolumeByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vol == nil {
+		s.error(w, http.StatusNotFound, "volume not found")
+		return
+	}
+
+	backups, err := s.store.ListBackups(vol.ID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.json(w, http.StatusOK, backups)
+}
+
+func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	var req struct {
+		BackupID string `json:"backup_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	vol, err := s.store.GetVolumeByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vol == nil {
+		s.error(w, http.StatusNotFound, "volume not found")
+		return
+	}
+
+	backup, err := s.store.GetBackup(req.BackupID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if backup == nil || backup.VolumeID != vol.ID {
+		s.error(w, http.StatusBadRequest, "backup does not exist or does not belong to this volume")
+		return
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &backup.ID,
+		Type:     events.BackupStarted.String(),
+		Message:  fmt.Sprintf("Restoring volume %s from backup %s", vol.Name, backup.ID),
+	})
+
+	// Check if attached service is running and needs to be stopped
+	var serviceRunning bool
+	var service *api.Service
+	if vol.AttachedServiceID != "" {
+		service, err = s.store.GetService(vol.AttachedServiceID)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if service != nil && service.ActualState == "running" && service.RuntimeID != "" {
+			serviceRunning = true
+			// Stop service
+			if err := s.runtime.StopContainer(r.Context(), service.RuntimeID); err != nil {
+				s.error(w, http.StatusInternalServerError, "failed to stop service before restore: "+err.Error())
+				return
+			}
+		}
+	}
+
+	// Safety: move current host path to temp safety location
+	tempPath := vol.HostPath + ".tmp_restore_bak"
+	if _, err := os.Stat(vol.HostPath); err == nil {
+		if err := os.Rename(vol.HostPath, tempPath); err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to move volume to safety directory: "+err.Error())
+			// Restart service if it was stopped
+			if serviceRunning {
+				s.runtime.StartContainer(r.Context(), service.RuntimeID)
+			}
+			return
+		}
+	}
+
+	// Verify checksum of backup archive
+	calcSum, err := ComputeFileSha256(backup.BackupPath)
+	if err != nil {
+		s.restoreRollback(vol.HostPath, tempPath)
+		if serviceRunning {
+			s.runtime.StartContainer(r.Context(), service.RuntimeID)
+		}
+		s.error(w, http.StatusInternalServerError, "failed to calculate backup checksum: "+err.Error())
+		return
+	}
+
+	if calcSum != backup.Checksum {
+		s.restoreRollback(vol.HostPath, tempPath)
+		if serviceRunning {
+			s.runtime.StartContainer(r.Context(), service.RuntimeID)
+		}
+		s.error(w, http.StatusBadRequest, fmt.Sprintf("backup checksum mismatch: expected %s, got %s", backup.Checksum, calcSum))
+		return
+	}
+
+	// Extract backup tarball
+	if err := ExtractTarGz(backup.BackupPath, vol.HostPath); err != nil {
+		s.restoreRollback(vol.HostPath, tempPath)
+		if serviceRunning {
+			s.runtime.StartContainer(r.Context(), service.RuntimeID)
+		}
+		s.error(w, http.StatusInternalServerError, "failed to extract backup tarball: "+err.Error())
+		return
+	}
+
+	// Clean up safety folder
+	if _, err := os.Stat(tempPath); err == nil {
+		os.RemoveAll(tempPath)
+	}
+
+	// Restart service if it was running
+	if serviceRunning {
+		if err := s.runtime.StartContainer(r.Context(), service.RuntimeID); err != nil {
+			s.error(w, http.StatusInternalServerError, "restore succeeded but failed to restart service: "+err.Error())
+			return
+		}
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &backup.ID,
+		Type:     events.BackupRestored.String(),
+		Message:  fmt.Sprintf("Successfully restored volume %s from backup %s", vol.Name, backup.ID),
+	})
+
+	s.json(w, http.StatusOK, map[string]string{"status": "restored"})
+}
+
+func (s *Server) restoreRollback(hostPath, tempPath string) {
+	if _, err := os.Stat(tempPath); err == nil {
+		os.RemoveAll(hostPath)
+		os.Rename(tempPath, hostPath)
+	}
+}
+
+func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	if svc.RuntimeID == "" {
+		s.error(w, http.StatusBadRequest, "service is not deployed or has no container ID")
+		return
+	}
+
+	followStr := r.URL.Query().Get("follow")
+	follow := followStr == "true" || followStr == "1"
+
+	tailStr := r.URL.Query().Get("tail")
+	tail := 0
+	if tailStr != "" {
+		if t, err := strconv.Atoi(tailStr); err == nil {
+			tail = t
+		}
+	}
+
+	stream, err := s.runtime.StreamLogs(r.Context(), svc.RuntimeID, follow, tail)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to get log stream: "+err.Error())
+		return
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.WriteHeader(http.StatusOK)
+
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	buffer := make([]byte, 4096)
+	for {
+		n, err := stream.Read(buffer)
+		if n > 0 {
+			w.Write(buffer[:n])
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
 }

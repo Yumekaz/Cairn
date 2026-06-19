@@ -91,3 +91,30 @@ func (c *Client) Post(ctx context.Context, path string, body interface{}, target
 func (c *Client) Delete(ctx context.Context, path string) error {
 	return c.execute(ctx, http.MethodDelete, path, nil, nil)
 }
+
+// Stream performs a GET request and returns the response body directly for streaming.
+func (c *Client) Stream(ctx context.Context, path string) (io.ReadCloser, error) {
+	url := "http://localhost" + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("unix socket connection failed: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
+}
