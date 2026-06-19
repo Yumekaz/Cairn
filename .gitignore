@@ -1,3 +1,20 @@
-stateful_first_server_paas.md
-stateful_first_server_paas_corrected.md
-MINIMUM_LOVABLE_PRODUCT.md
+# Binaries
+/bin/
+
+# Databases & local daemon directories
+*.db
+*.db-journal
+*.db-wal
+.cairn/
+cairn.db
+
+# Logs
+*.log
+
+# IDEs
+.idea/
+.vscode/
+.DS_Store
+
+# Specs / Documentation
+docs/specs/
