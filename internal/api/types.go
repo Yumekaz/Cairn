@@ -85,6 +85,8 @@ type ServiceConfig struct {
 	Volumes     []VolumeConfig     `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	HealthCheck *HealthCheckConfig `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
 	Restart     *RestartConfig     `yaml:"restart,omitempty" json:"restart,omitempty"`
+	Schedule    string             `yaml:"schedule,omitempty" json:"schedule,omitempty"`
+	Run         string             `yaml:"run,omitempty" json:"run,omitempty"`
 }
 
 type PortMapping struct {
@@ -108,6 +110,33 @@ type HealthCheckConfig struct {
 type RestartConfig struct {
 	Policy     string `yaml:"policy" json:"policy"`
 	MaxRetries int    `yaml:"max_retries" json:"max_retries"`
+}
+
+// CronJob represents a scheduled cron job configuration.
+type CronJob struct {
+	ID        string    `json:"id" db:"id"`
+	ServiceID string    `json:"service_id" db:"service_id"`
+	Name      string    `json:"name" db:"name"`
+	Schedule  string    `json:"schedule" db:"schedule"`
+	Command   string    `json:"command" db:"command"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// JobRun represents a recorded execution of a cron job or one-off run.
+type JobRun struct {
+	ID            string     `json:"id" db:"id"`
+	ServiceID     string     `json:"service_id" db:"service_id"`
+	CronJobID     *string    `json:"cron_job_id,omitempty" db:"cron_job_id"`
+	Type          string     `json:"type" db:"type"` // e.g., "one-off", "cron"
+	Name          string     `json:"name" db:"name"` // run name or command
+	Command       string     `json:"command" db:"command"`
+	Status        string     `json:"status" db:"status"` // pending, running, success, failed
+	ExitCode      *int       `json:"exit_code,omitempty" db:"exit_code"`
+	StartedAt     time.Time  `json:"started_at" db:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty" db:"finished_at"`
+	Logs          string     `json:"logs,omitempty" db:"logs"`
+	FailureReason string     `json:"failure_reason,omitempty" db:"failure_reason"`
 }
 
 // DaemonStatus represents the current state of the cairnd daemon.

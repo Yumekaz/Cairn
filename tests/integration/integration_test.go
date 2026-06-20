@@ -1,8 +1,11 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +16,7 @@ import (
 	"github.com/yumekaz/cairn/internal/api"
 	"github.com/yumekaz/cairn/internal/cli"
 	"github.com/yumekaz/cairn/internal/config"
+	"github.com/yumekaz/cairn/internal/daemon"
 	"github.com/yumekaz/cairn/internal/store"
 )
 
@@ -384,4 +388,148 @@ func TestMigrationsAndRollback(t *testing.T) {
 
 	// Clean up service
 	client.Delete(ctx, "/services/migrated-service", nil)
+}
+
+func TestWorkersOneOffAndCron(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/home/yumekaz"
+	}
+	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
+
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Skip("Cairn daemon socket does not exist. Skipping integration tests.")
+	}
+
+	client := cli.NewDaemonClient(socketPath)
+	ctx := context.Background()
+
+	// 1. Test Worker Workload
+	t.Log("Deploying a worker service...")
+	workerCfg := &api.ServiceConfig{
+		Name:    "test-worker",
+		Kind:    "worker",
+		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command: []string{"/bin/busybox", "sleep", "3600"},
+	}
+
+	var workerSvc api.Service
+	err = client.Post(ctx, "/services", workerCfg, &workerSvc)
+	if err != nil {
+		t.Fatalf("failed to deploy worker service: %v", err)
+	}
+	defer client.Delete(ctx, "/services/test-worker", nil)
+
+	if workerSvc.Route != "N/A" {
+		t.Errorf("expected worker route to be 'N/A', got '%s'", workerSvc.Route)
+	}
+
+	dbPath := filepath.Join(homeDir, ".cairn", "cairn.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	// 2. Test One-off Command
+	t.Log("Testing one-off task container execution...")
+	runReq := map[string]string{
+		"command": "echo 'Hello from One-Off Task'",
+	}
+
+	socketClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}
+
+	bodyBytes, _ := json.Marshal(runReq)
+	resp, err := socketClient.Post("http://localhost/services/test-worker/run", "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("failed to execute one-off run request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	respStr := string(respBytes)
+	t.Logf("One-off run output:\n%s", respStr)
+
+	if !strings.Contains(respStr, "Hello from One-Off Task") {
+		t.Errorf("expected logs to contain 'Hello from One-Off Task', got '%s'", respStr)
+	}
+	if !strings.Contains(respStr, "[cairn-exit-code] 0") {
+		t.Errorf("expected logs to contain exit code marker '[cairn-exit-code] 0', got '%s'", respStr)
+	}
+
+	// Check that a job run was recorded in the database
+	runs, err := st.ListJobRunsByService(workerSvc.ID)
+	if err != nil {
+		t.Fatalf("failed to list job runs: %v", err)
+	}
+	if len(runs) == 0 {
+		t.Error("expected a job run history record to be created, but found none")
+	} else {
+		run := runs[0]
+		if run.Type != "one-off" {
+			t.Errorf("expected job run type 'one-off', got '%s'", run.Type)
+		}
+		if run.Status != "success" {
+			t.Errorf("expected job run status 'success', got '%s'", run.Status)
+		}
+		if run.ExitCode == nil || *run.ExitCode != 0 {
+			t.Errorf("expected exit code 0, got %v", run.ExitCode)
+		}
+	}
+
+	// 3. Test Cron Scheduling
+	t.Log("Deploying a cron service...")
+	cronCfg := &api.ServiceConfig{
+		Name:     "test-cron-service",
+		Kind:     "cron",
+		Image:    "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Schedule: "* * * * *",
+		Run:      "echo 'Hello from Cron Job'",
+	}
+
+	var cronSvc api.Service
+	err = client.Post(ctx, "/services", cronCfg, &cronSvc)
+	if err != nil {
+		t.Fatalf("failed to deploy cron service: %v", err)
+	}
+	defer client.Delete(ctx, "/services/test-cron-service", nil)
+
+	// Verify no running containers are created at deployment time
+	if cronSvc.RuntimeID != "" {
+		t.Errorf("expected cron service RuntimeID to be empty, got '%s'", cronSvc.RuntimeID)
+	}
+
+	// Verify cron job is registered in SQLite
+	cj, err := st.GetCronJobByName("test-cron-service")
+	if err != nil {
+		t.Fatalf("failed to get cron job: %v", err)
+	}
+	if cj == nil {
+		t.Fatal("expected cron job 'test-cron-service' to exist in store, but found nil")
+	}
+	if cj.Schedule != "* * * * *" {
+		t.Errorf("expected schedule '* * * * *', got '%s'", cj.Schedule)
+	}
+
+	// Test matches for June 22, 2026 (Monday) at 02:05:00
+	t.Log("Verifying Cron Parser matches wildcard schedules correctly...")
+	sched, err := daemon.ParseCron("*/5 2,3 * 6 1-5")
+	if err != nil {
+		t.Fatalf("failed to parse cron: %v", err)
+	}
+
+	testTime := time.Date(2026, 6, 22, 2, 5, 0, 0, time.UTC)
+	if !sched.Matches(testTime) {
+		t.Error("expected schedule to match test time (June 22, 2026 02:05:00)")
+	}
 }

@@ -73,6 +73,34 @@ func (s *Store) Migrate() error {
 			metadata_json TEXT NOT NULL,
 			created_at DATETIME NOT NULL
 		);`,
+
+		`CREATE TABLE IF NOT EXISTS cron_jobs (
+			id TEXT PRIMARY KEY,
+			service_id TEXT NOT NULL,
+			name TEXT NOT NULL UNIQUE,
+			schedule TEXT NOT NULL,
+			command TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY,
+			service_id TEXT NOT NULL,
+			cron_job_id TEXT,
+			type TEXT NOT NULL,
+			name TEXT NOT NULL,
+			command TEXT NOT NULL,
+			status TEXT NOT NULL,
+			exit_code INTEGER,
+			started_at DATETIME NOT NULL,
+			finished_at DATETIME,
+			logs TEXT NOT NULL,
+			failure_reason TEXT,
+			FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE,
+			FOREIGN KEY(cron_job_id) REFERENCES cron_jobs(id) ON DELETE SET NULL
+		);`,
 	}
 
 	for _, query := range queries {

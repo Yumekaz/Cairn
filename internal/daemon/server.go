@@ -71,6 +71,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// Make sure the socket file is cleaned up on close
 	defer os.Remove(socketPath)
 
+	// Start background cron scheduler
+	sched := NewScheduler(s.store, s.runtime, s.config.DataDir)
+	go sched.Start(ctx)
+
 	httpServer := &http.Server{
 		Handler: s.router,
 	}

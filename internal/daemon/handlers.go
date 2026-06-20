@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,6 +34,16 @@ func (s *Server) setupRoutes() {
 			r.Delete("/", s.handleRemoveService)
 			r.Get("/logs", s.handleServiceLogs)
 			r.Post("/rollback", s.handleRollbackService)
+			r.Post("/run", s.handleRunOneOff)
+		})
+	})
+
+	s.router.Route("/cron", func(r chi.Router) {
+		r.Get("/", s.handleListCronJobs)
+		r.Post("/add", s.handleCreateCronJob)
+		r.Route("/{name}", func(r chi.Router) {
+			r.Delete("/", s.handleDeleteCronJob)
+			r.Get("/history", s.handleCronJobHistory)
 		})
 	})
 
@@ -257,6 +268,28 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, deploy *api.Deploy, svc *api.Service, previousRuntimeID string) (*api.Service, error) {
+	// Validate kind-specific requirements
+	if cfg.Kind == "cron" {
+		if cfg.Schedule == "" {
+			s.failDeploy(deploy, svc, "Validation failed: schedule is required for kind 'cron'")
+			return nil, fmt.Errorf("schedule is required for kind 'cron'")
+		}
+		if cfg.Run == "" {
+			s.failDeploy(deploy, svc, "Validation failed: run command is required for kind 'cron'")
+			return nil, fmt.Errorf("run command is required for kind 'cron'")
+		}
+		if _, err := ParseCron(cfg.Schedule); err != nil {
+			s.failDeploy(deploy, svc, "Validation failed: invalid cron schedule: "+err.Error())
+			return nil, fmt.Errorf("invalid cron schedule: %w", err)
+		}
+	} else if cfg.Kind == "worker" {
+		// Workers don't map ports
+		cfg.Ports = nil
+	} else {
+		// Clean up any stale cron jobs for this service if we are deploying a non-cron version
+		_ = s.store.DeleteCronJobByName(svc.Name)
+	}
+
 	// 1. Save configuration JSON
 	svcDir := filepath.Join(s.config.DataDir, "services", cfg.Name)
 	if err := os.MkdirAll(svcDir, 0755); err != nil {
@@ -375,6 +408,51 @@ func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, depl
 	}
 
 	// 4. Perform actual container orchestration
+	if cfg.Kind == "cron" {
+		// Clean up previous permanent container if it existed
+		if previousRuntimeID != "" {
+			_ = s.runtime.StopContainer(ctx, previousRuntimeID)
+			_ = s.runtime.RemoveContainer(ctx, previousRuntimeID)
+		}
+
+		// Register/update the cron job in store
+		cronJob := &api.CronJob{
+			ID:        uuid.New().String(),
+			ServiceID: svc.ID,
+			Name:      svc.Name,
+			Schedule:  cfg.Schedule,
+			Command:   cfg.Run,
+		}
+		if err := s.store.UpsertCronJob(cronJob); err != nil {
+			s.failDeploy(deploy, svc, "Failed to register cron job: "+err.Error())
+			return nil, err
+		}
+
+		// Update DB status
+		deploy.Status = "success"
+		deploy.Stage = "completed"
+		deploy.HealthStatus = "healthy"
+		timeNow := time.Now()
+		deploy.CompletedAt = &timeNow
+		_ = s.store.UpdateDeploy(deploy)
+
+		svc.RuntimeID = ""
+		svc.DesiredState = "active"
+		svc.ActualState = "active"
+		svc.Route = "N/A"
+		_ = s.store.UpsertService(svc)
+
+		_ = s.store.CreateEvent(&api.Event{
+			ID:        uuid.New().String(),
+			ServiceID: &svc.ID,
+			DeployID:  &deploy.ID,
+			Type:      events.DeploySucceeded.String(),
+			Message:   fmt.Sprintf("Successfully registered scheduled cron job for service %s", svc.Name),
+		})
+
+		return svc, nil
+	}
+
 	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
 
 	// Create candidate container in Mini-Docker
@@ -1147,4 +1225,319 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+// RunOneOffRequest represents the request body for running a one-off command.
+type RunOneOffRequest struct {
+	Command string `json:"command"`
+}
+
+func (s *Server) handleRunOneOff(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	var req RunOneOffRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Command == "" {
+		s.error(w, http.StatusBadRequest, "command is required")
+		return
+	}
+
+	if svc.CurrentDeployID == "" {
+		s.error(w, http.StatusBadRequest, "service has no current deployment configuration")
+		return
+	}
+
+	// Load configuration JSON from disk
+	cfgPath := filepath.Join(s.config.DataDir, "services", svc.Name, fmt.Sprintf("deploy_%s.json", svc.CurrentDeployID))
+	cfgJSON, err := os.ReadFile(cfgPath)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to read service deploy config: "+err.Error())
+		return
+	}
+
+	var cfg api.ServiceConfig
+	if err := json.Unmarshal(cfgJSON, &cfg); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to parse service deploy config: "+err.Error())
+		return
+	}
+
+	// Create job run history record
+	runID := uuid.New().String()
+	runName := fmt.Sprintf("%s-oneoff-%s", svc.Name, runID[:8])
+	jr := &api.JobRun{
+		ID:        runID,
+		ServiceID: svc.ID,
+		CronJobID: nil,
+		Type:      "one-off",
+		Name:      runName,
+		Command:   req.Command,
+		Status:    "running",
+		StartedAt: time.Now(),
+		Logs:      "",
+	}
+
+	if err := s.store.CreateJobRun(jr); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to create job run record: "+err.Error())
+		return
+	}
+
+	// Construct task container config
+	taskName := fmt.Sprintf("cairn-%s-oneoff-%s", svc.Name, runID[:8])
+	taskCfg := &api.ServiceConfig{
+		Name:        cfg.Name,
+		Kind:        cfg.Kind,
+		Image:       cfg.Image,
+		Command:     []string{"/bin/sh", "-c", req.Command},
+		Environment: cfg.Environment,
+		Volumes:     cfg.Volumes,
+	}
+
+	// Run container
+	containerID, err := s.runtime.CreateContainer(r.Context(), taskCfg, taskName)
+	if err != nil {
+		jr.Status = "failed"
+		jr.FailureReason = "Failed to create task container: " + err.Error()
+		now := time.Now()
+		jr.FinishedAt = &now
+		s.store.UpdateJobRun(jr)
+		s.error(w, http.StatusInternalServerError, "failed to create task container: "+err.Error())
+		return
+	}
+
+	defer func() {
+		// Clean up container
+		s.runtime.RemoveContainer(context.Background(), containerID)
+	}()
+
+	if err := s.runtime.StartContainer(r.Context(), containerID); err != nil {
+		jr.Status = "failed"
+		jr.FailureReason = "Failed to start task container: " + err.Error()
+		now := time.Now()
+		jr.FinishedAt = &now
+		s.store.UpdateJobRun(jr)
+		s.error(w, http.StatusInternalServerError, "failed to start task container: "+err.Error())
+		return
+	}
+
+	// Stream logs
+	stream, err := s.runtime.StreamLogs(r.Context(), containerID, true, 0)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to stream logs: "+err.Error())
+		return
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.WriteHeader(http.StatusOK)
+
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	// Start monitor goroutine to close the stream when the container stops.
+	// This works around the bug in Mini-Docker where logs stream with follow=true hangs forever.
+	monitorCtx, monitorCancel := context.WithCancel(r.Context())
+	defer monitorCancel()
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-monitorCtx.Done():
+				return
+			case <-ticker.C:
+				info, err := s.runtime.InspectContainer(context.Background(), containerID)
+				if err == nil && (info.State == runtime.StateStopped || info.State == runtime.StateError) {
+					// Wait a moment for any buffered logs to be printed
+					time.Sleep(1 * time.Second)
+					stream.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	buffer := make([]byte, 4096)
+	var allLogs strings.Builder
+	for {
+		n, err := stream.Read(buffer)
+		if n > 0 {
+			w.Write(buffer[:n])
+			allLogs.Write(buffer[:n])
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	// Wait for execution to finish
+	var exitCode int
+	var runErr error
+	for {
+		info, err := s.runtime.InspectContainer(r.Context(), containerID)
+		if err != nil {
+			runErr = err
+			break
+		}
+		if info.State == runtime.StateStopped || info.State == runtime.StateError {
+			if info.ExitCode != nil {
+				exitCode = *info.ExitCode
+			} else {
+				exitCode = -1
+			}
+			break
+		}
+		select {
+		case <-r.Context().Done():
+			runErr = r.Context().Err()
+			break
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	if runErr != nil {
+		jr.Status = "failed"
+		jr.FailureReason = "Execution error: " + runErr.Error()
+		now := time.Now()
+		jr.FinishedAt = &now
+		s.store.UpdateJobRun(jr)
+		return
+	}
+
+	// Update JobRun status
+	jr.Logs = allLogs.String()
+	jr.ExitCode = &exitCode
+	now := time.Now()
+	jr.FinishedAt = &now
+	if exitCode == 0 {
+		jr.Status = "success"
+	} else {
+		jr.Status = "failed"
+		jr.FailureReason = fmt.Sprintf("exit code %d", exitCode)
+	}
+	s.store.UpdateJobRun(jr)
+
+	// Write exit code marker to the end of the stream
+	fmt.Fprintf(w, "\n[cairn-exit-code] %d\n", exitCode)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (s *Server) handleListCronJobs(w http.ResponseWriter, r *http.Request) {
+	jobs, err := s.store.ListCronJobs()
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.json(w, http.StatusOK, jobs)
+}
+
+type CreateCronJobRequest struct {
+	ServiceName string `json:"service_name"`
+	Name        string `json:"name"`
+	Schedule    string `json:"schedule"`
+	Command     string `json:"command"`
+}
+
+func (s *Server) handleCreateCronJob(w http.ResponseWriter, r *http.Request) {
+	var req CreateCronJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.ServiceName == "" || req.Name == "" || req.Schedule == "" || req.Command == "" {
+		s.error(w, http.StatusBadRequest, "service_name, name, schedule, and command are required")
+		return
+	}
+
+	svc, err := s.store.GetServiceByName(req.ServiceName)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusBadRequest, "service not found: "+req.ServiceName)
+		return
+	}
+
+	if _, err := ParseCron(req.Schedule); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid schedule: "+err.Error())
+		return
+	}
+
+	cj := &api.CronJob{
+		ID:        uuid.New().String(),
+		ServiceID: svc.ID,
+		Name:      req.Name,
+		Schedule:  req.Schedule,
+		Command:   req.Command,
+	}
+
+	if err := s.store.UpsertCronJob(cj); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.json(w, http.StatusCreated, cj)
+}
+
+func (s *Server) handleDeleteCronJob(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	cj, err := s.store.GetCronJobByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if cj == nil {
+		s.error(w, http.StatusNotFound, "cron job not found")
+		return
+	}
+
+	if err := s.store.DeleteCronJobByName(name); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCronJobHistory(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	cj, err := s.store.GetCronJobByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if cj == nil {
+		s.error(w, http.StatusNotFound, "cron job not found")
+		return
+	}
+
+	history, err := s.store.ListJobRunsByCronJob(cj.ID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.json(w, http.StatusOK, history)
 }
