@@ -29,6 +29,7 @@ name: test-app
 kind: web
 image: /path/to/rootfs
 command: ["/bin/sh", "-c", "echo hello"]
+migration: "python manage.py db upgrade"
 ports:
   - host: 9090
     container: 80
@@ -72,6 +73,9 @@ restart:
 	}
 	if len(svcCfg.Command) != 3 || svcCfg.Command[0] != "/bin/sh" {
 		t.Errorf("unexpected command: %v", svcCfg.Command)
+	}
+	if svcCfg.Migration != "python manage.py db upgrade" {
+		t.Errorf("expected migration 'python manage.py db upgrade', got '%s'", svcCfg.Migration)
 	}
 	if len(svcCfg.Ports) != 1 || svcCfg.Ports[0].Host != 9090 || svcCfg.Ports[0].Container != 80 {
 		t.Errorf("unexpected ports mapping: %v", svcCfg.Ports)

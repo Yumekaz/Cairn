@@ -19,12 +19,13 @@ const (
 
 // ContainerInfo represents generic runtime container state.
 type ContainerInfo struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	Image     string         `json:"image"`
-	State     ContainerState `json:"state"`
-	IPAddress string         `json:"ip_address"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Image     string            `json:"image"`
+	State     ContainerState    `json:"state"`
+	IPAddress string            `json:"ip_address"`
 	Ports     []api.PortMapping `json:"ports"`
+	ExitCode  *int              `json:"exit_code,omitempty"`
 }
 
 // RuntimeBackend defines the abstract interface for managing containerized workloads.

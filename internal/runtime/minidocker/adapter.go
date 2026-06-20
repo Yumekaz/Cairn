@@ -161,6 +161,7 @@ func (a *MiniDockerAdapter) InspectContainer(ctx context.Context, id string) (*r
 		State:     state,
 		IPAddress: c.Network.IP,
 		Ports:     ports,
+		ExitCode:  c.ExitCode,
 	}, nil
 }
 

@@ -32,6 +32,7 @@ type MiniDockerContainer struct {
 	RootFS    string             `json:"rootfs"`
 	Command   []string           `json:"command"`
 	Status    string             `json:"status"` // e.g. "created", "running", "stopped"
+	ExitCode  *int               `json:"exit_code,omitempty"`
 	Network   MiniDockerNetwork  `json:"network"`
 	Volumes   []MiniDockerVolume `json:"volumes,omitempty"`
 }

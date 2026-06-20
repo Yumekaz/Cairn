@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/yumekaz/cairn/internal/api"
 	"github.com/yumekaz/cairn/internal/events"
+	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
 )
 
@@ -29,6 +32,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/restart", s.handleRestartService)
 			r.Delete("/", s.handleRemoveService)
 			r.Get("/logs", s.handleServiceLogs)
+			r.Post("/rollback", s.handleRollbackService)
 		})
 	})
 
@@ -242,24 +246,149 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Message:   fmt.Sprintf("Deploying service %s (Deploy ID: %s)", svc.Name, deployID),
 	})
 
-	// 2. Perform actual container orchestration
-	ctx := r.Context()
-	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deployID[:8])
-
-	// Create candidate container in Mini-Docker
-	candidateID, err := s.runtime.CreateContainer(ctx, &cfg, candidateName)
+	// Run flow
+	updatedSvc, err := s.runDeployFlow(r.Context(), &cfg, deploy, svc, previousRuntimeID)
 	if err != nil {
-		s.failDeploy(deploy, svc, "Failed to create container: "+err.Error())
 		s.error(w, http.StatusInternalServerError, "Deployment failed: "+err.Error())
 		return
+	}
+
+	s.json(w, http.StatusCreated, updatedSvc)
+}
+
+func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, deploy *api.Deploy, svc *api.Service, previousRuntimeID string) (*api.Service, error) {
+	// 1. Save configuration JSON
+	svcDir := filepath.Join(s.config.DataDir, "services", cfg.Name)
+	if err := os.MkdirAll(svcDir, 0755); err != nil {
+		s.failDeploy(deploy, svc, "Failed to create service config directory: "+err.Error())
+		return nil, err
+	}
+	cfgPath := filepath.Join(svcDir, fmt.Sprintf("deploy_%s.json", deploy.ID))
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		s.failDeploy(deploy, svc, "Failed to serialize service config: "+err.Error())
+		return nil, err
+	}
+	if err := os.WriteFile(cfgPath, cfgJSON, 0644); err != nil {
+		s.failDeploy(deploy, svc, "Failed to write service config: "+err.Error())
+		return nil, err
+	}
+
+	// 2. Pre-deploy backup gate if migration is non-empty
+	if cfg.Migration != "" {
+		for _, volConfig := range cfg.Volumes {
+			vol, err := s.store.GetVolumeByName(volConfig.Name)
+			if err != nil {
+				s.failDeploy(deploy, svc, "Failed to retrieve volume for backup: "+err.Error())
+				return nil, err
+			}
+			if vol != nil {
+				backup, err := s.performVolumeBackup(vol)
+				if err != nil {
+					s.failDeploy(deploy, svc, fmt.Sprintf("Pre-deploy backup failed for volume %s: %s", vol.Name, err.Error()))
+					return nil, err
+				}
+				if backup.Status == "failed" {
+					reason := backup.FailureReason
+					if reason == "" {
+						reason = "unknown error"
+					}
+					s.failDeploy(deploy, svc, fmt.Sprintf("Pre-deploy backup failed for volume %s: %s", vol.Name, reason))
+					return nil, fmt.Errorf("pre-deploy backup failed: %s", reason)
+				}
+			}
+		}
+
+		// 3. Execute migration container
+		taskName := fmt.Sprintf("cairn-%s-task-%s", svc.Name, deploy.ID[:8])
+		taskCfg := &api.ServiceConfig{
+			Name:        cfg.Name,
+			Kind:        cfg.Kind,
+			Image:       cfg.Image,
+			Command:     []string{"/bin/sh", "-c", cfg.Migration},
+			Environment: cfg.Environment,
+			Volumes:     cfg.Volumes,
+		}
+
+		taskID, err := s.runtime.CreateContainer(ctx, taskCfg, taskName)
+		if err != nil {
+			s.failDeploy(deploy, svc, "Failed to create migration task container: "+err.Error())
+			return nil, err
+		}
+
+		// Start migration task container
+		if err := s.runtime.StartContainer(ctx, taskID); err != nil {
+			s.runtime.RemoveContainer(ctx, taskID)
+			s.failDeploy(deploy, svc, "Failed to start migration task container: "+err.Error())
+			return nil, err
+		}
+
+		// Wait for migration task container to exit
+		var exitCode int
+		var runErr error
+		for {
+			info, err := s.runtime.InspectContainer(ctx, taskID)
+			if err != nil {
+				runErr = err
+				break
+			}
+			if info.State == runtime.StateStopped || info.State == runtime.StateError {
+				if info.ExitCode != nil {
+					exitCode = *info.ExitCode
+				} else {
+					exitCode = -1
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+				runErr = ctx.Err()
+				break
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+
+		if runErr != nil {
+			s.runtime.RemoveContainer(ctx, taskID)
+			s.failDeploy(deploy, svc, "Migration execution context failed: "+runErr.Error())
+			return nil, runErr
+		}
+
+		if exitCode != 0 {
+			logs := s.getContainerLogs(ctx, taskID)
+			s.runtime.RemoveContainer(ctx, taskID)
+			s.failDeploy(deploy, svc, fmt.Sprintf("Migration failed with exit code %d. Logs:\n%s", exitCode, logs))
+			return nil, fmt.Errorf("migration failed (exit code %d): %s", exitCode, logs)
+		}
+
+		// Clean up migration container
+		s.runtime.RemoveContainer(ctx, taskID)
+
+		// Wait a moment for network and ARP tables to settle
+		time.Sleep(1 * time.Second)
+
+		// Set StateTouched = true
+		deploy.StateTouched = true
+		if err := s.store.UpdateDeploy(deploy); err != nil {
+			return nil, err
+		}
+	}
+
+	// 4. Perform actual container orchestration
+	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
+
+	// Create candidate container in Mini-Docker
+	candidateID, err := s.runtime.CreateContainer(ctx, cfg, candidateName)
+	if err != nil {
+		s.failDeploy(deploy, svc, "Failed to create container: "+err.Error())
+		return nil, err
 	}
 
 	// Start candidate container
 	if err := s.runtime.StartContainer(ctx, candidateID); err != nil {
 		s.runtime.RemoveContainer(ctx, candidateID) // clean up candidate
 		s.failDeploy(deploy, svc, "Failed to start container: "+err.Error())
-		s.error(w, http.StatusInternalServerError, "Deployment failed: "+err.Error())
-		return
+		return nil, err
 	}
 
 	// Find mapped host port to run health checks on
@@ -273,17 +402,18 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		info, err := s.runtime.InspectContainer(ctx, candidateID)
 		if err != nil {
 			s.failDeploy(deploy, svc, "Failed to inspect container: "+err.Error())
-			s.error(w, http.StatusInternalServerError, "Deployment failed: "+err.Error())
-			return
+			return nil, err
 		}
 		if err := RunHealthCheck(ctx, cfg.HealthCheck, info.IPAddress, cfg.Ports[0].Container); err != nil {
+			// Fetch candidate container logs before cleaning it up
+			logs := s.getContainerLogs(ctx, candidateID)
+
 			// Clean up candidate
 			s.runtime.StopContainer(ctx, candidateID)
 			s.runtime.RemoveContainer(ctx, candidateID)
 
-			s.failDeploy(deploy, svc, "Health check failed: "+err.Error())
-			s.error(w, http.StatusInternalServerError, "Deployment failed: container health checks failed: "+err.Error())
-			return
+			s.failDeploy(deploy, svc, fmt.Sprintf("Health check failed: %s. Logs:\n%s", err.Error(), logs))
+			return nil, fmt.Errorf("container health checks failed: %w", err)
 		}
 	}
 
@@ -314,12 +444,221 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	s.store.CreateEvent(&api.Event{
 		ID:        uuid.New().String(),
 		ServiceID: &svc.ID,
-		DeployID:  &deployID,
+		DeployID:  &deploy.ID,
 		Type:      events.DeploySucceeded.String(),
 		Message:   fmt.Sprintf("Successfully deployed service %s (container: %s)", svc.Name, candidateName),
 	})
 
-	s.json(w, http.StatusCreated, svc)
+	return svc, nil
+}
+
+func (s *Server) getContainerLogs(ctx context.Context, id string) string {
+	stream, err := s.runtime.StreamLogs(ctx, id, false, 100)
+	if err != nil {
+		return "failed to get logs: " + err.Error()
+	}
+	defer stream.Close()
+
+	bytes, err := io.ReadAll(stream)
+	if err != nil {
+		return "failed to read logs: " + err.Error()
+	}
+	return string(bytes)
+}
+
+func (s *Server) performVolumeBackup(vol *api.Volume) (*api.Backup, error) {
+	// Ensure the volume host directory exists before performing backup
+	if err := os.MkdirAll(vol.HostPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create host volume directory: %w", err)
+	}
+
+	backupID := fmt.Sprintf("backup_%s_%s", vol.Name, time.Now().Format("20060102_150405"))
+	backupDir := filepath.Join(s.config.BackupDir, vol.Name)
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create backup directory: %w", err)
+	}
+
+	backupPath := filepath.Join(backupDir, backupID+".tar.gz")
+
+	b := &api.Backup{
+		ID:         backupID,
+		VolumeID:   vol.ID,
+		BackupPath: backupPath,
+		Status:     "pending",
+		CreatedAt:  time.Now(),
+	}
+
+	if err := s.store.CreateBackup(b); err != nil {
+		return nil, fmt.Errorf("failed to create backup record: %w", err)
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &b.ID,
+		Type:     events.BackupStarted.String(),
+		Message:  fmt.Sprintf("Started backup for volume %s (ID: %s)", vol.Name, backupID),
+	})
+
+	checksum, sizeBytes, err := CreateTarGz(vol.HostPath, backupPath)
+	if err != nil {
+		b.Status = "failed"
+		b.FailureReason = err.Error()
+		timeNow := time.Now()
+		b.CompletedAt = &timeNow
+		s.store.UpdateBackup(b)
+
+		s.store.CreateEvent(&api.Event{
+			ID:       uuid.New().String(),
+			VolumeID: &vol.ID,
+			BackupID: &b.ID,
+			Type:     events.BackupFailed.String(),
+			Message:  fmt.Sprintf("Backup failed for volume %s: %v", vol.Name, err),
+		})
+
+		return b, fmt.Errorf("failed to create tarball: %w", err)
+	}
+
+	b.Status = "success"
+	b.SizeBytes = sizeBytes
+	b.Checksum = checksum
+	timeNow := time.Now()
+	b.CompletedAt = &timeNow
+	if err := s.store.UpdateBackup(b); err != nil {
+		return b, fmt.Errorf("failed to update backup record: %w", err)
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &b.ID,
+		Type:     events.BackupSucceeded.String(),
+		Message:  fmt.Sprintf("Backup completed successfully for volume %s (Size: %d bytes)", vol.Name, sizeBytes),
+	})
+
+	return b, nil
+}
+
+func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	var req struct {
+		DeployID string `json:"deploy_id"`
+		Force    bool   `json:"force"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.DeployID == "" {
+		s.error(w, http.StatusBadRequest, "deploy_id is required")
+		return
+	}
+
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	// Fetch all deploys for the service
+	deploys, err := s.store.ListDeploys(svc.ID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Find target deploy
+	var targetDeploy *api.Deploy
+	for _, d := range deploys {
+		if d.ID == req.DeployID {
+			targetDeploy = d
+			break
+		}
+	}
+
+	if targetDeploy == nil {
+		s.error(w, http.StatusNotFound, "target deployment not found")
+		return
+	}
+
+	// Check if target deploy is already the current deploy
+	if svc.CurrentDeployID == targetDeploy.ID {
+		s.error(w, http.StatusBadRequest, "service is already at target deployment")
+		return
+	}
+
+	// Find intervening deploys with state_touched = true
+	var dangerousDeploys []*api.Deploy
+	for _, d := range deploys {
+		if d.Status == "success" && d.StateTouched && d.CreatedAt.After(targetDeploy.CreatedAt) {
+			dangerousDeploys = append(dangerousDeploys, d)
+		}
+	}
+
+	if len(dangerousDeploys) > 0 && !req.Force {
+		msg := fmt.Sprintf("Rollback target '%s' is unsafe: %d intervening successful deployment(s) executed migrations and modified state since then (including deploy '%s'). Proceeding might cause data or schema mismatch.",
+			targetDeploy.ID[:8], len(dangerousDeploys), dangerousDeploys[0].ID[:8])
+		s.error(w, http.StatusConflict, msg)
+		return
+	}
+
+	// Load target deploy config from disk
+	cfgPath := filepath.Join(s.config.DataDir, "services", svc.Name, fmt.Sprintf("deploy_%s.json", targetDeploy.ID))
+	cfgJSON, err := os.ReadFile(cfgPath)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to read target deploy configuration: "+err.Error())
+		return
+	}
+
+	var cfg api.ServiceConfig
+	if err := json.Unmarshal(cfgJSON, &cfg); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to parse target deploy configuration: "+err.Error())
+		return
+	}
+
+	// Create a new Deploy record for the rollback
+	newDeployID := uuid.New().String()
+	newDeploy := &api.Deploy{
+		ID:               newDeployID,
+		ServiceID:        svc.ID,
+		Version:          targetDeploy.Version,
+		SourcePath:       "rollback",
+		Status:           "pending",
+		Stage:            "starting",
+		HealthStatus:     "unhealthy",
+		PreviousDeployID: svc.CurrentDeployID,
+	}
+
+	if err := s.store.CreateDeploy(newDeploy); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Record start event
+	s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		DeployID:  &newDeployID,
+		Type:      events.DeployStarted.String(),
+		Message:   fmt.Sprintf("Rolling back service %s to Deploy ID: %s (New Deploy ID: %s)", svc.Name, targetDeploy.ID, newDeployID),
+	})
+
+	previousRuntimeID := svc.RuntimeID
+
+	// Run flow
+	updatedSvc, err := s.runDeployFlow(r.Context(), &cfg, newDeploy, svc, previousRuntimeID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, "Rollback failed: "+err.Error())
+		return
+	}
+
+	s.json(w, http.StatusOK, updatedSvc)
 }
 
 func (s *Server) failDeploy(deploy *api.Deploy, svc *api.Service, reason string) {
@@ -592,73 +931,11 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	backupID := fmt.Sprintf("backup_%s_%s", vol.Name, time.Now().Format("20060102_150405"))
-	backupDir := filepath.Join(s.config.BackupDir, vol.Name)
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		s.error(w, http.StatusInternalServerError, "failed to create backup directory: "+err.Error())
-		return
-	}
-
-	backupPath := filepath.Join(backupDir, backupID+".tar.gz")
-
-	b := &api.Backup{
-		ID:         backupID,
-		VolumeID:   vol.ID,
-		BackupPath: backupPath,
-		Status:     "pending",
-		CreatedAt:  time.Now(),
-	}
-
-	if err := s.store.CreateBackup(b); err != nil {
-		s.error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.store.CreateEvent(&api.Event{
-		ID:       uuid.New().String(),
-		VolumeID: &vol.ID,
-		BackupID: &b.ID,
-		Type:     events.BackupStarted.String(),
-		Message:  fmt.Sprintf("Started backup for volume %s (ID: %s)", vol.Name, backupID),
-	})
-
-	checksum, sizeBytes, err := CreateTarGz(vol.HostPath, backupPath)
+	b, err := s.performVolumeBackup(vol)
 	if err != nil {
-		b.Status = "failed"
-		b.FailureReason = err.Error()
-		timeNow := time.Now()
-		b.CompletedAt = &timeNow
-		s.store.UpdateBackup(b)
-
-		s.store.CreateEvent(&api.Event{
-			ID:       uuid.New().String(),
-			VolumeID: &vol.ID,
-			BackupID: &b.ID,
-			Type:     events.BackupFailed.String(),
-			Message:  fmt.Sprintf("Backup failed for volume %s: %v", vol.Name, err),
-		})
-
-		s.error(w, http.StatusInternalServerError, "failed to create tarball: "+err.Error())
-		return
-	}
-
-	b.Status = "success"
-	b.SizeBytes = sizeBytes
-	b.Checksum = checksum
-	timeNow := time.Now()
-	b.CompletedAt = &timeNow
-	if err := s.store.UpdateBackup(b); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	s.store.CreateEvent(&api.Event{
-		ID:       uuid.New().String(),
-		VolumeID: &vol.ID,
-		BackupID: &b.ID,
-		Type:     events.BackupSucceeded.String(),
-		Message:  fmt.Sprintf("Backup completed successfully for volume %s (Size: %d bytes)", vol.Name, sizeBytes),
-	})
 
 	s.json(w, http.StatusCreated, b)
 }

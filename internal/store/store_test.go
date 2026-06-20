@@ -133,6 +133,7 @@ func TestDeploysCRUD(t *testing.T) {
 		Status:       "running",
 		Stage:        "health-checking",
 		HealthStatus: "checking",
+		StateTouched: true,
 		CreatedAt:    time.Now(),
 	}
 
@@ -148,9 +149,13 @@ func TestDeploysCRUD(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected deploy to be found")
 	}
+	if got.StateTouched != true {
+		t.Errorf("expected StateTouched true, got %t", got.StateTouched)
+	}
 
 	deploy.Status = "success"
 	deploy.HealthStatus = "healthy"
+	deploy.StateTouched = false
 	now := time.Now()
 	deploy.CompletedAt = &now
 
@@ -162,6 +167,9 @@ func TestDeploysCRUD(t *testing.T) {
 	gotUpdated, _ := st.GetDeploy(deployID)
 	if gotUpdated.Status != "success" {
 		t.Errorf("expected status 'success', got '%s'", gotUpdated.Status)
+	}
+	if gotUpdated.StateTouched != false {
+		t.Errorf("expected StateTouched to be updated to false, got %t", gotUpdated.StateTouched)
 	}
 }
 

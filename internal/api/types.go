@@ -75,15 +75,16 @@ type Event struct {
 
 // ServiceConfig represents the parsed configuration of a service (from cairn.yaml).
 type ServiceConfig struct {
-	Name        string            `yaml:"name" json:"name"`
-	Kind        string            `yaml:"kind" json:"kind"`
-	Image       string            `yaml:"image" json:"image"`
-	Command     []string          `yaml:"command,omitempty" json:"command,omitempty"`
-	Environment map[string]string `yaml:"environment,omitempty" json:"environment,omitempty"`
-	Ports       []PortMapping     `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Volumes     []VolumeConfig    `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Name        string             `yaml:"name" json:"name"`
+	Kind        string             `yaml:"kind" json:"kind"`
+	Image       string             `yaml:"image" json:"image"`
+	Command     []string           `yaml:"command,omitempty" json:"command,omitempty"`
+	Migration   string             `yaml:"migration,omitempty" json:"migration,omitempty"`
+	Environment map[string]string  `yaml:"environment,omitempty" json:"environment,omitempty"`
+	Ports       []PortMapping      `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Volumes     []VolumeConfig     `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	HealthCheck *HealthCheckConfig `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
-	Restart     *RestartConfig    `yaml:"restart,omitempty" json:"restart,omitempty"`
+	Restart     *RestartConfig     `yaml:"restart,omitempty" json:"restart,omitempty"`
 }
 
 type PortMapping struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/yumekaz/cairn/internal/api"
 	"github.com/yumekaz/cairn/internal/cli"
 	"github.com/yumekaz/cairn/internal/config"
+	"github.com/yumekaz/cairn/internal/store"
 )
 
 func TestEndToEndMLP(t *testing.T) {
@@ -188,4 +189,199 @@ func TestEndToEndMLP(t *testing.T) {
 		t.Errorf("expected original healthy state '%s', got '%s'", stateA, string(bodyBytes))
 	}
 	t.Log("Failed deploy protection verified! Original service remains active and healthy.")
+}
+
+func TestMigrationsAndRollback(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/home/yumekaz"
+	}
+	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
+
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Skip("Cairn daemon socket does not exist. Skipping integration tests.")
+	}
+
+	client := cli.NewDaemonClient(socketPath)
+	ctx := context.Background()
+
+	// 1. Deploy service with migration
+	svcCfg1 := &api.ServiceConfig{
+		Name:      "migrated-service",
+		Kind:      "web",
+		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command:   []string{"/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"},
+		Migration: "echo \"Migrated State\" > /www/index.html",
+		Ports: []api.PortMapping{
+			{Host: 8082, Container: 80},
+		},
+		Volumes: []api.VolumeConfig{
+			{Name: "migration-vol", MountPath: "/www"},
+		},
+		HealthCheck: &api.HealthCheckConfig{
+			HTTPPath:     "/index.html",
+			Interval:     1 * time.Second,
+			Timeout:      1 * time.Second,
+			Retries:      3,
+			StartupGrace: 1 * time.Second,
+		},
+	}
+
+	// Make sure target volume path is clean
+	volPath := filepath.Join(homeDir, ".cairn", "volumes", "migration-vol")
+	os.RemoveAll(volPath)
+
+	t.Log("Deploying migrated-service (Deploy 1)...")
+	var result1 api.Service
+	err = client.Post(ctx, "/services", svcCfg1, &result1)
+	if err != nil {
+		t.Fatalf("failed to deploy service with migration: %v", err)
+	}
+
+	deployID1 := result1.CurrentDeployID
+	t.Logf("Deploy 1 Succeeded (ID: %s)", deployID1)
+
+	// Verify that StateTouched is true for Deploy 1 in SQLite database
+	dbPath := filepath.Join(homeDir, ".cairn", "cairn.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	d1, err := st.GetDeploy(deployID1)
+	if err != nil {
+		t.Fatalf("failed to get deploy 1: %v", err)
+	}
+	if !d1.StateTouched {
+		t.Error("expected deploy 1 to have StateTouched = true")
+	}
+
+	// Verify that a volume backup was automatically created for migration-vol
+	vol, err := st.GetVolumeByName("migration-vol")
+	if err != nil {
+		t.Fatalf("failed to get volume: %v", err)
+	}
+	if vol == nil {
+		t.Fatal("expected volume migration-vol to exist")
+	}
+
+	backups, err := st.ListBackups(vol.ID)
+	if err != nil {
+		t.Fatalf("failed to list backups: %v", err)
+	}
+	if len(backups) == 0 {
+		t.Error("expected a pre-deploy backup to have been automatically created")
+	}
+
+	// 2. Deploy service without migration (Deploy 2)
+	svcCfg2 := &api.ServiceConfig{
+		Name:    "migrated-service",
+		Kind:    "web",
+		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command: []string{"/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"},
+		Ports: []api.PortMapping{
+			{Host: 8082, Container: 80},
+		},
+		Volumes: []api.VolumeConfig{
+			{Name: "migration-vol", MountPath: "/www"},
+		},
+		HealthCheck: &api.HealthCheckConfig{
+			HTTPPath:     "/index.html",
+			Interval:     1 * time.Second,
+			Timeout:      1 * time.Second,
+			Retries:      3,
+			StartupGrace: 1 * time.Second,
+		},
+	}
+
+	t.Log("Deploying migrated-service without migration (Deploy 2)...")
+	var result2 api.Service
+	err = client.Post(ctx, "/services", svcCfg2, &result2)
+	if err != nil {
+		t.Fatalf("failed to deploy service without migration: %v", err)
+	}
+
+	deployID2 := result2.CurrentDeployID
+	t.Logf("Deploy 2 Succeeded (ID: %s)", deployID2)
+
+	d2, err := st.GetDeploy(deployID2)
+	if err != nil {
+		t.Fatalf("failed to get deploy 2: %v", err)
+	}
+	if d2.StateTouched {
+		t.Error("expected deploy 2 to have StateTouched = false")
+	}
+
+	// 3. Deploy service with migration (Deploy 3)
+	svcCfg3 := &api.ServiceConfig{
+		Name:      "migrated-service",
+		Kind:      "web",
+		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command:   []string{"/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"},
+		Migration: "echo \"Migrated State 2\" > /www/index.html",
+		Ports: []api.PortMapping{
+			{Host: 8082, Container: 80},
+		},
+		Volumes: []api.VolumeConfig{
+			{Name: "migration-vol", MountPath: "/www"},
+		},
+		HealthCheck: &api.HealthCheckConfig{
+			HTTPPath:     "/index.html",
+			Interval:     1 * time.Second,
+			Timeout:      1 * time.Second,
+			Retries:      3,
+			StartupGrace: 1 * time.Second,
+		},
+	}
+
+	t.Log("Deploying migrated-service with migration again (Deploy 3)...")
+	var result3 api.Service
+	err = client.Post(ctx, "/services", svcCfg3, &result3)
+	if err != nil {
+		t.Fatalf("failed to deploy service with migration 3: %v", err)
+	}
+
+	deployID3 := result3.CurrentDeployID
+	t.Logf("Deploy 3 Succeeded (ID: %s)", deployID3)
+
+	d3, err := st.GetDeploy(deployID3)
+	if err != nil {
+		t.Fatalf("failed to get deploy 3: %v", err)
+	}
+	if !d3.StateTouched {
+		t.Error("expected deploy 3 to have StateTouched = true")
+	}
+
+	// 4. Try to rollback to Deploy 2 (without force)
+	t.Log("Attempting unsafe rollback to Deploy 2 (expecting conflict)...")
+	rollbackPath := "/services/migrated-service/rollback"
+	rollbackReq := map[string]interface{}{
+		"deploy_id": deployID2,
+		"force":     false,
+	}
+	var rollbackRes api.Service
+	err = client.Post(ctx, rollbackPath, rollbackReq, &rollbackRes)
+	if err == nil {
+		t.Error("expected unsafe rollback to fail with 409 Conflict, but it succeeded")
+	} else {
+		if !strings.Contains(err.Error(), "status 409") {
+			t.Errorf("expected 409 Conflict error, got: %v", err)
+		} else {
+			t.Logf("Unsafe rollback correctly blocked: %v", err)
+		}
+	}
+
+	// 5. Rollback to Deploy 2 with force = true
+	t.Log("Attempting forced rollback to Deploy 2...")
+	rollbackReq["force"] = true
+	err = client.Post(ctx, rollbackPath, rollbackReq, &rollbackRes)
+	if err != nil {
+		t.Fatalf("forced rollback failed: %v", err)
+	}
+
+	t.Logf("Forced rollback succeeded! Current Deploy ID: %s", rollbackRes.CurrentDeployID)
+
+	// Clean up service
+	client.Delete(ctx, "/services/migrated-service", nil)
 }
