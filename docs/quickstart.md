@@ -1,0 +1,131 @@
+# Cairn Quickstart Guide
+
+This guide gets you up and running with Cairn PaaS and Mini-Docker on a local Linux host.
+
+---
+
+## 🛠️ Prerequisites
+
+Before installing, make sure your Linux system meets these requirements:
+
+1. **Go**: Version 1.22+ (to compile binaries).
+2. **Python**: Version 3.10+ (to run the Mini-Docker daemon).
+3. **OverlayFS**: The Linux kernel must support OverlayFS.
+
+### Load OverlayFS Module
+Ensure OverlayFS is active:
+```bash
+sudo modprobe overlay
+```
+To load it automatically on system boot, add it to `/etc/modules`:
+```bash
+echo "overlay" | sudo tee -a /etc/modules
+```
+
+---
+
+## ⚙️ Step 1: Install Cairn
+
+Run the installer script from the root of the Cairn repository:
+```bash
+./scripts/install.sh
+```
+This script will:
+- Compile the `cairn` CLI client and `cairnd` control daemon.
+- Install the binaries to `~/.local/bin/` (or `/usr/local/bin` if run as root).
+- Create the default directory layout in `~/.cairn/`.
+
+Make sure `~/.local/bin` is in your environment `PATH`. If not, add it to your shell config (e.g. `~/.bashrc`):
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+---
+
+## 🐋 Step 2: Start Mini-Docker Daemon
+
+Cairn uses Mini-Docker as its containerization runtime backend. Start the Mini-Docker daemon as root (in a separate terminal) and allow access:
+```bash
+sudo python3 -m mini_docker daemon --socket-mode 666
+```
+
+---
+
+## 🚀 Step 3: Start the Cairn Daemon
+
+1. Initialize the SQLite metadata store and default configuration:
+   ```bash
+   cairn init
+   ```
+2. Start the control plane daemon:
+   ```bash
+   cairnd
+   # or
+   cairn daemon start
+   ```
+
+---
+
+## 📦 Step 4: Deploy your First App
+
+Deploy the bundled stateful `counter-api` application:
+```bash
+cairn deploy examples/counter-api/cairn.yaml
+```
+
+Check the status of your services:
+```bash
+# General daemon status (uptime, active count, disk free/warnings)
+cairn status
+
+# Tabular process list of running containers
+cairn ps
+
+# View the full JSON metadata registered for your service
+cairn inspect counter-api
+```
+
+Interact with the running API (serving on `http://localhost:8080/`):
+```bash
+curl http://localhost:8080/index.html
+```
+
+---
+
+## 💾 Step 5: Test State Persistence & Recovery
+
+1. **State Persistence**: Write something to the persistent volume mounted under `~/.cairn/volumes/counter-data/`:
+   ```bash
+   echo "Stateful Data A" > ~/.cairn/volumes/counter-data/index.html
+   curl http://localhost:8080/index.html
+   ```
+2. **Container Restarts**: Restart the service. The data should persist:
+   ```bash
+   cairn restart counter-api
+   curl http://localhost:8080/index.html
+   ```
+3. **Backup & Restore**: Create a compressed volume snapshot:
+   ```bash
+   cairn backup create counter-data
+   cairn backup list counter-data
+   ```
+   Now corrupt the data:
+   ```bash
+   echo "Corrupted State B" > ~/.cairn/volumes/counter-data/index.html
+   curl http://localhost:8080/index.html
+   ```
+   Restore from the backup:
+   ```bash
+   cairn restore counter-data <backup_id>
+   curl http://localhost:8080/index.html
+   ```
+
+---
+
+## 📊 Step 6: View Dashboard
+
+You can access the embedded web dashboard:
+```bash
+cairn dashboard
+```
+This opens your system browser to `http://127.0.0.1:2476/dashboard/` where you can view daemon health, start/stop services, look at logs, manage backups, and view chronological audit events.

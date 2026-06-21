@@ -1,0 +1,7 @@
+name: queue-worker
+kind: worker
+image: /home/yumekaz/Desktop/Mini-Docker/rootfs
+command: ["/bin/sh", "-c", "echo 'Starting Queue Worker...'; while true; do echo 'Processing jobs...'; sleep 10; done"]
+restart:
+  policy: on-failure
+  max_retries: 5
