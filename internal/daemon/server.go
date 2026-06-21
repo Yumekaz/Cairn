@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -46,7 +47,7 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(middleware.Recoverer)
 }
 
-// Start listens on the configured Unix socket.
+// Start listens on the configured Unix socket and optionally on TCP.
 func (s *Server) Start(ctx context.Context) error {
 	socketPath := s.config.SocketPath
 
@@ -75,11 +76,36 @@ func (s *Server) Start(ctx context.Context) error {
 	sched := NewScheduler(s.store, s.runtime, s.config.DataDir)
 	go sched.Start(ctx)
 
+	// Start secondary TCP server for dashboard/API if configured
+	if s.config.DashboardAddr != "" {
+		tcpListener, err := net.Listen("tcp", s.config.DashboardAddr)
+		if err == nil {
+			log.Printf("cairnd: Dashboard and API TCP server listening on http://%s", s.config.DashboardAddr)
+			httpServerTCP := &http.Server{
+				Handler: s.router,
+			}
+			go func() {
+				if err := httpServerTCP.Serve(tcpListener); err != nil && err != http.ErrServerClosed {
+					log.Printf("cairnd: Dashboard TCP server error: %v", err)
+				}
+			}()
+			// Graceful shutdown for TCP server
+			go func() {
+				<-ctx.Done()
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				httpServerTCP.Shutdown(shutdownCtx)
+			}()
+		} else {
+			log.Printf("cairnd: Warning: Failed to start dashboard TCP server on %s: %v", s.config.DashboardAddr, err)
+		}
+	}
+
 	httpServer := &http.Server{
 		Handler: s.router,
 	}
 
-	// Graceful shutdown goroutine
+	// Graceful shutdown goroutine for primary Unix server
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -711,3 +711,141 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 	}
 }
 
+func TestDashboardV1(t *testing.T) {
+	// 1. Create a temporary data directory and store for test
+	tempDir, err := os.MkdirTemp("", "cairn-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "cairn.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	// 2. Setup a daemon config with a random free port for DashboardAddr
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on random port: %v", err)
+	}
+	addr := listener.Addr().String()
+	listener.Close() // Close it so the daemon can bind to it
+
+	socketPath := filepath.Join(tempDir, "cairnd.sock")
+	cfg := &config.DaemonConfig{
+		SocketPath:    socketPath,
+		DatabasePath:  dbPath,
+		DataDir:       tempDir,
+		VolumeDir:     filepath.Join(tempDir, "volumes"),
+		BackupDir:     filepath.Join(tempDir, "backups"),
+		DashboardAddr: addr,
+	}
+
+	// 3. Create server
+	// We can pass nil or mock for RuntimeBackend since we are only testing routes and static asset serving
+	srv := daemon.NewServer(cfg, st, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := srv.Start(ctx); err != nil && err != http.ErrServerClosed {
+			t.Logf("server start error: %v", err)
+		}
+	}()
+
+	// Wait for server to start
+	time.Sleep(200 * time.Millisecond)
+
+	// 4. Verify we can fetch the dashboard assets from the TCP address
+	clientHttp := &http.Client{Timeout: 2 * time.Second}
+	
+	// Test redirect / -> /dashboard/
+	resp, err := clientHttp.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatalf("failed to reach root redirect: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 (after redirect), got %d", resp.StatusCode)
+	}
+
+	// Test index.html
+	resp, err = clientHttp.Get("http://" + addr + "/dashboard/index.html")
+	if err != nil {
+		t.Fatalf("failed to fetch index.html: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("failed to read index.html body: %v", err)
+	}
+	if !strings.Contains(string(body), "<title>Cairn Dashboard</title>") {
+		t.Errorf("index.html body does not contain expected title. Body: %s", string(body))
+	}
+
+	// Test index.css
+	resp, err = clientHttp.Get("http://" + addr + "/dashboard/index.css")
+	if err != nil {
+		t.Fatalf("failed to fetch index.css: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for index.css, got %d", resp.StatusCode)
+	}
+
+	// Test index.js
+	resp, err = clientHttp.Get("http://" + addr + "/dashboard/index.js")
+	if err != nil {
+		t.Fatalf("failed to fetch index.js: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for index.js, got %d", resp.StatusCode)
+	}
+
+	// 5. Test GET /services/{name}/deploys on a dummy service
+	// Create a dummy service in the store
+	dummySvc := &api.Service{
+		ID:           "test-service-id",
+		Name:         "test-service",
+		Kind:         "web",
+		DesiredState: "running",
+		ActualState:  "running",
+	}
+	if err := st.UpsertService(dummySvc); err != nil {
+		t.Fatalf("failed to create dummy service: %v", err)
+	}
+
+	// Create a dummy deploy record
+	dummyDeploy := &api.Deploy{
+		ID:        "test-deploy-id",
+		ServiceID: "test-service-id",
+		Version:   "1.0.0",
+		Status:    "success",
+		CreatedAt: time.Now(),
+	}
+	if err := st.CreateDeploy(dummyDeploy); err != nil {
+		t.Fatalf("failed to create dummy deploy: %v", err)
+	}
+
+	resp, err = clientHttp.Get("http://" + addr + "/services/test-service/deploys")
+	if err != nil {
+		t.Fatalf("failed to fetch deploys API: %v", err)
+	}
+	var deploys []*api.Deploy
+	if err := json.NewDecoder(resp.Body).Decode(&deploys); err != nil {
+		resp.Body.Close()
+		t.Fatalf("failed to decode deploys response: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(deploys) != 1 || deploys[0].ID != "test-deploy-id" {
+		t.Errorf("expected 1 deploy with ID 'test-deploy-id', got: %v", deploys)
+	}
+}
+
+

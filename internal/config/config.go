@@ -16,6 +16,7 @@ type DaemonConfig struct {
 	VolumeDir        string `yaml:"volume_dir"`
 	BackupDir        string `yaml:"backup_dir"`
 	MiniDockerSocket string `yaml:"mini_docker_socket"`
+	DashboardAddr    string `yaml:"dashboard_addr"`
 }
 
 // DefaultConfig returns the default configuration based on environment and disk availability.
@@ -61,6 +62,7 @@ func DefaultConfig() *DaemonConfig {
 		VolumeDir:        volumeDir,
 		BackupDir:        backupDir,
 		MiniDockerSocket: miniDockerSocket,
+		DashboardAddr:    "127.0.0.1:2476",
 	}
 }
 

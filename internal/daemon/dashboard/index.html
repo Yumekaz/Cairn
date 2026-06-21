@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Cairn Stateful-First Server/PaaS Dashboard - Local Admin Console">
+  <title>Cairn Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="cairn-logo">
+          <div class="stone s1"></div>
+          <div class="stone s2"></div>
+          <div class="stone s3"></div>
+          <div class="stone s4"></div>
+        </div>
+        <h1>CAIRN</h1>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="#/overview" class="nav-item active" id="nav-overview">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          Overview
+        </a>
+        <a href="#/services" class="nav-item" id="nav-services">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          Services
+        </a>
+        <a href="#/volumes" class="nav-item" id="nav-volumes">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          Volumes & Backups
+        </a>
+        <a href="#/events" class="nav-item" id="nav-events">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Events
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="connection-status">
+          <span class="status-indicator online"></span>
+          <span id="daemon-connection-text">Connected</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top header bar with status indicators -->
+      <header class="main-header">
+        <div class="header-title">
+          <h2 id="page-title">Overview</h2>
+          <p id="page-subtitle" class="text-muted">Status and indicators for Cairn daemon</p>
+        </div>
+        <div class="header-stats">
+          <div class="header-stat">
+            <span class="stat-label">Uptime</span>
+            <span class="stat-value" id="stat-uptime">0s</span>
+          </div>
+          <div class="header-stat">
+            <span class="stat-label">Active Services</span>
+            <span class="stat-value" id="stat-active">0</span>
+          </div>
+          <div class="header-stat">
+            <span class="stat-label">Storage Usage</span>
+            <span class="stat-value" id="stat-storage">0 B</span>
+          </div>
+          <div class="header-stat">
+            <span class="stat-label">Version</span>
+            <span class="stat-value" id="stat-version">0.0.0</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Active Tab Panels -->
+      <section class="tab-panel" id="panel-overview">
+        <!-- Dashboard Summary Row -->
+        <div class="metrics-grid">
+          <div class="glass-card metric-card">
+            <div class="card-icon blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="22" y2="7"/><line x1="2" y1="17" x2="22" y2="17"/></svg>
+            </div>
+            <div class="metric-info">
+              <h3>Services</h3>
+              <p class="metric-number" id="overview-services-count">0</p>
+              <p class="metric-desc">Registered deployments</p>
+            </div>
+          </div>
+          <div class="glass-card metric-card">
+            <div class="card-icon green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+            </div>
+            <div class="metric-info">
+              <h3>Volumes</h3>
+              <p class="metric-number" id="overview-volumes-count">0</p>
+              <p class="metric-desc">Persistent state drives</p>
+            </div>
+          </div>
+          <div class="glass-card metric-card">
+            <div class="card-icon purple">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div class="metric-info">
+              <h3>Backups</h3>
+              <p class="metric-number" id="overview-backups-count">0</p>
+              <p class="metric-desc">Volume snapshot archives</p>
+            </div>
+          </div>
+          <div class="glass-card metric-card">
+            <div class="card-icon orange">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div class="metric-info">
+              <h3>Uptime Score</h3>
+              <p class="metric-number" id="overview-uptime-text">Healthy</p>
+              <p class="metric-desc">Daemon liveness verified</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="overview-layout">
+          <!-- Recent Services Table -->
+          <div class="glass-card grid-col-2">
+            <div class="card-header">
+              <h3>Recent Services</h3>
+              <a href="#/services" class="btn-link">View All →</a>
+            </div>
+            <div class="table-container">
+              <table class="data-table" id="table-recent-services">
+                <thead>
+                  <tr>
+                    <th>Service Name</th>
+                    <th>Kind</th>
+                    <th>Actual State</th>
+                    <th>Endpoints</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td colspan="4" class="text-center">Loading services...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Recent Events -->
+          <div class="glass-card">
+            <div class="card-header">
+              <h3>Recent System Events</h3>
+              <a href="#/events" class="btn-link">View Audit →</a>
+            </div>
+            <div class="recent-events-list" id="overview-events-list">
+              <p class="text-muted text-center py-4">No recent events.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" id="panel-services">
+        <!-- Services Header Controls -->
+        <div class="action-bar mb-4">
+          <div class="search-box">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="input-search-services" placeholder="Filter services by name or kind...">
+          </div>
+        </div>
+
+        <!-- Services Flex/Grid List -->
+        <div class="services-list-grid" id="services-container">
+          <div class="glass-card text-center py-5">
+            <p class="text-muted">Loading services list...</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" id="panel-volumes">
+        <div class="volumes-grid">
+          <!-- Volumes List -->
+          <div class="glass-card flex-grow-2">
+            <div class="card-header">
+              <h3>Persistent Volumes</h3>
+            </div>
+            <div class="table-container">
+              <table class="data-table" id="table-volumes">
+                <thead>
+                  <tr>
+                    <th>Volume Name</th>
+                    <th>Attached Service</th>
+                    <th>Mount Path</th>
+                    <th>Host Path</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="volumes-list-body">
+                  <tr>
+                    <td colspan="5" class="text-center">Loading volumes...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Backups List -->
+          <div class="glass-card" id="backup-inspector-card">
+            <div class="card-header">
+              <div>
+                <h3>Backups</h3>
+                <p class="card-subtitle text-muted" id="backup-subtitle">Select a volume to view backups</p>
+              </div>
+              <button class="btn btn-primary btn-sm hidden" id="btn-create-backup">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Backup Now
+              </button>
+            </div>
+            <div class="backups-list-container" id="backups-list-body">
+              <p class="text-muted text-center py-5">Please select a volume from the list on the left to inspect its snapshots.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" id="panel-events">
+        <div class="glass-card">
+          <div class="card-header">
+            <h3>System Event Log</h3>
+            <button class="btn btn-secondary btn-sm" id="btn-refresh-events">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right:4px;"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Refresh
+            </button>
+          </div>
+          <div class="timeline-container" id="timeline-events-body">
+            <p class="text-muted text-center py-5">Loading events timeline...</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Dialog: Service Detail Overlay (Drawer/Modal) -->
+  <div class="modal-overlay hidden" id="modal-service-detail">
+    <div class="glass-modal modal-large">
+      <div class="modal-header">
+        <div>
+          <h2 id="detail-service-name">service-name</h2>
+          <span class="badge" id="detail-service-status">running</span>
+        </div>
+        <button class="modal-close-btn" id="btn-close-service-modal">&times;</button>
+      </div>
+      <div class="modal-body service-modal-grid">
+        <!-- Details Column -->
+        <div class="service-details-col">
+          <div class="info-section">
+            <h4>General Details</h4>
+            <div class="info-grid">
+              <span class="info-label">Service ID:</span>
+              <span class="info-value text-mono" id="detail-service-id">-</span>
+              
+              <span class="info-label">Service Kind:</span>
+              <span class="info-value" id="detail-service-kind">-</span>
+              
+              <span class="info-label">Runtime Engine:</span>
+              <span class="info-value" id="detail-service-runtime">-</span>
+              
+              <span class="info-label">Runtime ID:</span>
+              <span class="info-value text-mono" id="detail-service-runtime-id">-</span>
+              
+              <span class="info-label">Route:</span>
+              <span class="info-value text-mono" id="detail-service-route">-</span>
+            </div>
+          </div>
+          
+          <div class="info-section mt-4">
+            <h4>Deploy Actions</h4>
+            <div class="btn-group">
+              <button class="btn btn-success" id="btn-action-start">Start</button>
+              <button class="btn btn-warning" id="btn-action-stop">Stop</button>
+              <button class="btn btn-primary" id="btn-action-restart">Restart</button>
+            </div>
+          </div>
+
+          <div class="info-section mt-4 flex-grow-1 flex-column">
+            <h4>Deployment History</h4>
+            <div class="deploys-history-list" id="detail-deploys-list">
+              <p class="text-muted">Loading history...</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Terminal Logs Column -->
+        <div class="service-logs-col">
+          <div class="logs-header">
+            <h4>Console Output Logs</h4>
+            <div class="logs-controls">
+              <button class="btn btn-secondary btn-sm" id="btn-logs-wrap">Wrap</button>
+              <button class="btn btn-secondary btn-sm" id="btn-logs-clear">Clear</button>
+              <button class="btn btn-primary btn-sm" id="btn-logs-refresh">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="console-log-pane" id="service-logs-console">
+            <div class="log-line text-muted">Awaiting console output stream...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dialog: Dangerous Operation Confirmation Modal -->
+  <div class="modal-overlay hidden" id="modal-confirm-action" style="z-index: 1100;">
+    <div class="glass-modal modal-sm text-center">
+      <div class="modal-header">
+        <h3>Confirm State Modification</h3>
+        <button class="modal-close-btn" id="btn-close-confirm-modal">&times;</button>
+      </div>
+      <div class="modal-body py-4">
+        <div class="warning-icon-container">
+          <svg class="warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <h4 class="text-danger mt-3" id="confirm-title">Unsafe Operation Warning</h4>
+        <p class="text-muted mt-2" id="confirm-message">This action modifies running state. Schema, DB credentials, or data files might change. Check rollback safety before running.</p>
+        
+        <div class="confirm-checkbox-wrapper mt-4">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-confirm-understand">
+            I understand the risk and want to proceed
+          </label>
+        </div>
+        
+        <div class="confirm-input-wrapper mt-3 hidden" id="confirm-force-text-wrapper">
+          <p class="text-muted text-sm mb-2">Type <span class="text-mono font-bold text-danger">FORCE</span> to confirm</p>
+          <input type="text" id="input-confirm-force" class="form-control text-center" placeholder="type FORCE here">
+        </div>
+      </div>
+      <div class="modal-footer justify-center">
+        <button class="btn btn-secondary mr-2" id="btn-confirm-cancel">Cancel</button>
+        <button class="btn btn-danger" id="btn-confirm-proceed" disabled>Proceed Action</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

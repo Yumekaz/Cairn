@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/yumekaz/cairn/internal/api"
+	"github.com/yumekaz/cairn/internal/daemon/dashboard"
 	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
@@ -29,6 +30,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/", s.handleCreateService)
 		r.Route("/{name}", func(r chi.Router) {
 			r.Get("/", s.handleGetService)
+			r.Get("/deploys", s.handleGetServiceDeploys)
 			r.Post("/start", s.handleStartService)
 			r.Post("/stop", s.handleStopService)
 			r.Post("/restart", s.handleRestartService)
@@ -60,6 +62,11 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.router.Get("/events", s.handleListEvents)
+
+	s.router.Handle("/dashboard/*", http.StripPrefix("/dashboard", dashboard.Handler()))
+	s.router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+	})
 }
 
 func (s *Server) json(w http.ResponseWriter, status int, data interface{}) {
@@ -1876,4 +1883,25 @@ func (s *Server) resolveEnvPlaceholders(ctx context.Context, env map[string]stri
 		resolved[k] = val
 	}
 	return resolved
+}
+
+func (s *Server) handleGetServiceDeploys(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	deploys, err := s.store.ListDeploys(svc.ID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.json(w, http.StatusOK, deploys)
 }
