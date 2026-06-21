@@ -101,6 +101,28 @@ func (s *Store) Migrate() error {
 			FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE,
 			FOREIGN KEY(cron_job_id) REFERENCES cron_jobs(id) ON DELETE SET NULL
 		);`,
+
+		`CREATE TABLE IF NOT EXISTS duraflow_workflows (
+			id TEXT PRIMARY KEY,
+			type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			current_step_index INTEGER NOT NULL DEFAULT 0,
+			input_json TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS duraflow_steps (
+			id TEXT PRIMARY KEY,
+			workflow_id TEXT NOT NULL,
+			step_index INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			status TEXT NOT NULL,
+			error_message TEXT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY(workflow_id) REFERENCES duraflow_workflows(id) ON DELETE CASCADE
+		);`,
 	}
 
 	for _, query := range queries {

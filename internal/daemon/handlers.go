@@ -266,7 +266,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Run flow
-	updatedSvc, err := s.runDeployFlow(r.Context(), &cfg, deploy, svc, previousRuntimeID)
+	updatedSvc, err := s.runDeployWorkflowSync(r.Context(), &cfg, deploy, svc, previousRuntimeID)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, "Deployment failed: "+err.Error())
 		return
@@ -275,271 +275,118 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	s.json(w, http.StatusCreated, updatedSvc)
 }
 
-func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, deploy *api.Deploy, svc *api.Service, previousRuntimeID string) (*api.Service, error) {
-	// Validate kind-specific requirements
-	if cfg.Kind == "cron" {
-		if cfg.Schedule == "" {
-			s.failDeploy(deploy, svc, "Validation failed: schedule is required for kind 'cron'")
-			return nil, fmt.Errorf("schedule is required for kind 'cron'")
-		}
-		if cfg.Run == "" {
-			s.failDeploy(deploy, svc, "Validation failed: run command is required for kind 'cron'")
-			return nil, fmt.Errorf("run command is required for kind 'cron'")
-		}
-		if _, err := ParseCron(cfg.Schedule); err != nil {
-			s.failDeploy(deploy, svc, "Validation failed: invalid cron schedule: "+err.Error())
-			return nil, fmt.Errorf("invalid cron schedule: %w", err)
-		}
-	} else if cfg.Kind == "worker" || cfg.Kind == "postgres" || cfg.Kind == "redis" || cfg.Kind == "db" {
-		// Workers and DBs bypass port mapping / proxy routing by setting Ports = nil
-		cfg.Ports = nil
-		_ = s.store.DeleteCronJobByName(svc.Name)
-	} else {
-		// Clean up any stale cron jobs for this service if we are deploying a non-cron version
-		_ = s.store.DeleteCronJobByName(svc.Name)
-	}
-
-	// 1. Save configuration JSON
-	svcDir := filepath.Join(s.config.DataDir, "services", cfg.Name)
-	if err := os.MkdirAll(svcDir, 0755); err != nil {
-		s.failDeploy(deploy, svc, "Failed to create service config directory: "+err.Error())
-		return nil, err
-	}
-	cfgPath := filepath.Join(svcDir, fmt.Sprintf("deploy_%s.json", deploy.ID))
-	cfgJSON, err := json.Marshal(cfg)
+func (s *Server) runWorkflowSync(ctx context.Context, wType string, input interface{}) (*api.Workflow, error) {
+	workflowID, err := s.duraflow.StartWorkflow(wType, input)
 	if err != nil {
-		s.failDeploy(deploy, svc, "Failed to serialize service config: "+err.Error())
-		return nil, err
-	}
-	if err := os.WriteFile(cfgPath, cfgJSON, 0644); err != nil {
-		s.failDeploy(deploy, svc, "Failed to write service config: "+err.Error())
 		return nil, err
 	}
 
-	// 2. Pre-deploy backup gate if migration is non-empty
-	if cfg.Migration != "" {
-		for _, volConfig := range cfg.Volumes {
-			vol, err := s.store.GetVolumeByName(volConfig.Name)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			w, err := s.store.GetWorkflow(workflowID)
 			if err != nil {
-				s.failDeploy(deploy, svc, "Failed to retrieve volume for backup: "+err.Error())
-				return nil, err
+				return nil, fmt.Errorf("failed to fetch workflow status: %w", err)
 			}
-			if vol != nil {
-				backup, err := s.performVolumeBackup(vol)
-				if err != nil {
-					s.failDeploy(deploy, svc, fmt.Sprintf("Pre-deploy backup failed for volume %s: %s", vol.Name, err.Error()))
-					return nil, err
-				}
-				if backup.Status == "failed" {
-					reason := backup.FailureReason
-					if reason == "" {
-						reason = "unknown error"
+			if w == nil {
+				return nil, fmt.Errorf("workflow %s not found in store", workflowID)
+			}
+			if w.Status == "success" {
+				return w, nil
+			}
+			if w.Status == "failed" {
+				steps, _ := s.store.GetWorkflowSteps(workflowID)
+				var lastErr string
+				for _, step := range steps {
+					if step.Status == "failed" && step.ErrorMessage != "" {
+						lastErr = step.ErrorMessage
+						break
 					}
-					s.failDeploy(deploy, svc, fmt.Sprintf("Pre-deploy backup failed for volume %s: %s", vol.Name, reason))
-					return nil, fmt.Errorf("pre-deploy backup failed: %s", reason)
 				}
-			}
-		}
-
-		// 3. Execute migration container
-		taskName := fmt.Sprintf("cairn-%s-task-%s", svc.Name, deploy.ID[:8])
-		taskCfg := &api.ServiceConfig{
-			Name:        cfg.Name,
-			Kind:        cfg.Kind,
-			Image:       cfg.Image,
-			Command:     []string{"/bin/sh", "-c", cfg.Migration},
-			Environment: s.resolveEnvPlaceholders(ctx, cfg.Environment),
-			Volumes:     cfg.Volumes,
-		}
-
-		taskID, err := s.runtime.CreateContainer(ctx, taskCfg, taskName)
-		if err != nil {
-			s.failDeploy(deploy, svc, "Failed to create migration task container: "+err.Error())
-			return nil, err
-		}
-
-		// Start migration task container
-		if err := s.runtime.StartContainer(ctx, taskID); err != nil {
-			s.runtime.RemoveContainer(ctx, taskID)
-			s.failDeploy(deploy, svc, "Failed to start migration task container: "+err.Error())
-			return nil, err
-		}
-
-		// Wait for migration task container to exit
-		var exitCode int
-		var runErr error
-		for {
-			info, err := s.runtime.InspectContainer(ctx, taskID)
-			if err != nil {
-				runErr = err
-				break
-			}
-			if info.State == runtime.StateStopped || info.State == runtime.StateError {
-				if info.ExitCode != nil {
-					exitCode = *info.ExitCode
-				} else {
-					exitCode = -1
+				if lastErr != "" {
+					return nil, fmt.Errorf("workflow failed: %s", lastErr)
 				}
-				break
+				return nil, fmt.Errorf("workflow failed with unknown error")
 			}
-			select {
-			case <-ctx.Done():
-				runErr = ctx.Err()
-				break
-			case <-time.After(200 * time.Millisecond):
-			}
-		}
-
-		if runErr != nil {
-			s.runtime.RemoveContainer(ctx, taskID)
-			s.failDeploy(deploy, svc, "Migration execution context failed: "+runErr.Error())
-			return nil, runErr
-		}
-
-		if exitCode != 0 {
-			logs := s.getContainerLogs(ctx, taskID)
-			s.runtime.RemoveContainer(ctx, taskID)
-			s.failDeploy(deploy, svc, fmt.Sprintf("Migration failed with exit code %d. Logs:\n%s", exitCode, logs))
-			return nil, fmt.Errorf("migration failed (exit code %d): %s", exitCode, logs)
-		}
-
-		// Clean up migration container
-		s.runtime.RemoveContainer(ctx, taskID)
-
-		// Wait a moment for network and ARP tables to settle
-		time.Sleep(1 * time.Second)
-
-		// Set StateTouched = true
-		deploy.StateTouched = true
-		if err := s.store.UpdateDeploy(deploy); err != nil {
-			return nil, err
 		}
 	}
+}
 
-	// 4. Perform actual container orchestration
-	if cfg.Kind == "cron" {
-		// Clean up previous permanent container if it existed
-		if previousRuntimeID != "" {
-			_ = s.runtime.StopContainer(ctx, previousRuntimeID)
-			_ = s.runtime.RemoveContainer(ctx, previousRuntimeID)
-		}
-
-		// Register/update the cron job in store
-		cronJob := &api.CronJob{
-			ID:        uuid.New().String(),
-			ServiceID: svc.ID,
-			Name:      svc.Name,
-			Schedule:  cfg.Schedule,
-			Command:   cfg.Run,
-		}
-		if err := s.store.UpsertCronJob(cronJob); err != nil {
-			s.failDeploy(deploy, svc, "Failed to register cron job: "+err.Error())
-			return nil, err
-		}
-
-		// Update DB status
-		deploy.Status = "success"
-		deploy.Stage = "completed"
-		deploy.HealthStatus = "healthy"
-		timeNow := time.Now()
-		deploy.CompletedAt = &timeNow
-		_ = s.store.UpdateDeploy(deploy)
-
-		svc.RuntimeID = ""
-		svc.DesiredState = "active"
-		svc.ActualState = "active"
-		svc.Route = "N/A"
-		_ = s.store.UpsertService(svc)
-
-		_ = s.store.CreateEvent(&api.Event{
-			ID:        uuid.New().String(),
-			ServiceID: &svc.ID,
-			DeployID:  &deploy.ID,
-			Type:      events.DeploySucceeded.String(),
-			Message:   fmt.Sprintf("Successfully registered scheduled cron job for service %s", svc.Name),
-		})
-
-		return svc, nil
+func (s *Server) runDeployWorkflowSync(ctx context.Context, cfg *api.ServiceConfig, deploy *api.Deploy, svc *api.Service, previousRuntimeID string) (*api.Service, error) {
+	input := DeployInput{
+		ServiceConfig:     *cfg,
+		Deploy:            *deploy,
+		Service:           *svc,
+		PreviousRuntimeID: previousRuntimeID,
 	}
 
-	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
-
-	// Resolve dynamic IP variables in Environment config
-	cfg.Environment = s.resolveEnvPlaceholders(ctx, cfg.Environment)
-
-	// Create candidate container in Mini-Docker
-	candidateID, err := s.runtime.CreateContainer(ctx, cfg, candidateName)
+	_, err := s.runWorkflowSync(ctx, "deploy", input)
 	if err != nil {
-		s.failDeploy(deploy, svc, "Failed to create container: "+err.Error())
 		return nil, err
 	}
 
-	// Start candidate container
-	if err := s.runtime.StartContainer(ctx, candidateID); err != nil {
-		s.runtime.RemoveContainer(ctx, candidateID) // clean up candidate
-		s.failDeploy(deploy, svc, "Failed to start container: "+err.Error())
+	updatedSvc, err := s.store.GetService(svc.ID)
+	if err != nil {
+		return nil, err
+	}
+	return updatedSvc, nil
+}
+
+func (s *Server) runBackupWorkflowSync(ctx context.Context, vol *api.Volume) (*api.Backup, error) {
+	backupID := uuid.New().String()
+	input := BackupInput{
+		VolumeName: vol.Name,
+		BackupID:   backupID,
+	}
+
+	_, err := s.runWorkflowSync(ctx, "backup", input)
+	if err != nil {
 		return nil, err
 	}
 
-	// Find mapped host port to run health checks on
-	hostPort := 0
-	if len(cfg.Ports) > 0 {
-		hostPort = cfg.Ports[0].Host
+	backup, err := s.store.GetBackup(backupID)
+	if err != nil {
+		return nil, err
+	}
+	return backup, nil
+}
+
+func (s *Server) runRestoreWorkflowSync(ctx context.Context, vol *api.Volume, backupID string) error {
+	input := RestoreInput{
+		VolumeName: vol.Name,
+		BackupID:   backupID,
 	}
 
-	// Run health check if configured and ports exist
-	if hostPort > 0 && cfg.HealthCheck != nil {
-		info, err := s.runtime.InspectContainer(ctx, candidateID)
-		if err != nil {
-			s.failDeploy(deploy, svc, "Failed to inspect container: "+err.Error())
-			return nil, err
-		}
-		if err := RunHealthCheck(ctx, cfg.HealthCheck, info.IPAddress, cfg.Ports[0].Container); err != nil {
-			// Fetch candidate container logs before cleaning it up
-			logs := s.getContainerLogs(ctx, candidateID)
+	_, err := s.runWorkflowSync(ctx, "restore", input)
+	return err
+}
 
-			// Clean up candidate
-			s.runtime.StopContainer(ctx, candidateID)
-			s.runtime.RemoveContainer(ctx, candidateID)
-
-			s.failDeploy(deploy, svc, fmt.Sprintf("Health check failed: %s. Logs:\n%s", err.Error(), logs))
-			return nil, fmt.Errorf("container health checks failed: %w", err)
-		}
+func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
+	list, err := s.store.ListWorkflows()
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
 	}
+	s.json(w, http.StatusOK, list)
+}
 
-	// Success! Route traffic and clean up the old container
-	if previousRuntimeID != "" {
-		s.runtime.StopContainer(ctx, previousRuntimeID)
-		s.runtime.RemoveContainer(ctx, previousRuntimeID)
+func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	wf, err := s.store.GetWorkflow(id)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-
-	// Update DB status
-	deploy.Status = "success"
-	deploy.Stage = "completed"
-	deploy.HealthStatus = "healthy"
-	timeNow := time.Now()
-	deploy.CompletedAt = &timeNow
-	s.store.UpdateDeploy(deploy)
-
-	svc.RuntimeID = candidateID
-	svc.DesiredState = "running"
-	svc.ActualState = "running"
-	if hostPort > 0 {
-		svc.Route = fmt.Sprintf("http://localhost:%d", hostPort)
-	} else {
-		svc.Route = "N/A"
+	if wf == nil {
+		s.error(w, http.StatusNotFound, "workflow not found")
+		return
 	}
-	s.store.UpsertService(svc)
-
-	s.store.CreateEvent(&api.Event{
-		ID:        uuid.New().String(),
-		ServiceID: &svc.ID,
-		DeployID:  &deploy.ID,
-		Type:      events.DeploySucceeded.String(),
-		Message:   fmt.Sprintf("Successfully deployed service %s (container: %s)", svc.Name, candidateName),
-	})
-
-	return svc, nil
+	s.json(w, http.StatusOK, wf)
 }
 
 func (s *Server) getContainerLogs(ctx context.Context, id string) string {
@@ -860,7 +707,7 @@ func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
 	previousRuntimeID := svc.RuntimeID
 
 	// Run flow
-	updatedSvc, err := s.runDeployFlow(r.Context(), &cfg, newDeploy, svc, previousRuntimeID)
+	updatedSvc, err := s.runDeployWorkflowSync(r.Context(), &cfg, newDeploy, svc, previousRuntimeID)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, "Rollback failed: "+err.Error())
 		return
@@ -1171,7 +1018,7 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b, err := s.performVolumeBackup(vol)
+	b, err := s.runBackupWorkflowSync(r.Context(), vol)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1230,149 +1077,11 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.CreateEvent(&api.Event{
-		ID:       uuid.New().String(),
-		VolumeID: &vol.ID,
-		BackupID: &backup.ID,
-		Type:     events.BackupStarted.String(),
-		Message:  fmt.Sprintf("Restoring volume %s from backup %s", vol.Name, backup.ID),
-	})
-
-	var serviceRunning bool
-	var service *api.Service
-	var isPostgres bool
-
-	if vol.AttachedServiceID != "" {
-		service, err = s.store.GetService(vol.AttachedServiceID)
-		if err != nil {
-			s.error(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if service != nil {
-			if service.Kind == "postgres" {
-				isPostgres = true
-			} else if service.ActualState == "running" && service.RuntimeID != "" {
-				serviceRunning = true
-				// Stop service
-				if err := s.runtime.StopContainer(r.Context(), service.RuntimeID); err != nil {
-					s.error(w, http.StatusInternalServerError, "failed to stop service before restore: "+err.Error())
-					return
-				}
-			}
-		}
-	}
-
-	if isPostgres {
-		if service.RuntimeID == "" {
-			s.error(w, http.StatusBadRequest, "cannot restore: database container has not been initialized/deployed")
-			return
-		}
-		// Ensure database container is running so we can restore logically
-		dbInfo, err := s.runtime.InspectContainer(r.Context(), service.RuntimeID)
-		if err != nil {
-			s.error(w, http.StatusInternalServerError, "failed to inspect database container: "+err.Error())
-			return
-		}
-		if dbInfo.State != runtime.StateRunning {
-			if err := s.runtime.StartContainer(r.Context(), service.RuntimeID); err != nil {
-				s.error(w, http.StatusInternalServerError, "failed to start database container for logical restore: "+err.Error())
-				return
-			}
-			service.ActualState = "running"
-			s.store.UpsertService(service)
-		}
-
-		// Verify checksum of backup archive
-		calcSum, err := ComputeFileSha256(backup.BackupPath)
-		if err != nil {
-			s.error(w, http.StatusInternalServerError, "failed to calculate backup checksum: "+err.Error())
-			return
-		}
-		if calcSum != backup.Checksum {
-			s.error(w, http.StatusBadRequest, fmt.Sprintf("backup checksum mismatch: expected %s, got %s", backup.Checksum, calcSum))
-			return
-		}
-
-		// Perform logical restore
-		if err := s.performPostgresRestore(r.Context(), vol, service, backup); err != nil {
-			s.error(w, http.StatusInternalServerError, "failed to perform logical database restore: "+err.Error())
-			return
-		}
-
-		s.store.CreateEvent(&api.Event{
-			ID:       uuid.New().String(),
-			VolumeID: &vol.ID,
-			BackupID: &backup.ID,
-			Type:     events.BackupRestored.String(),
-			Message:  fmt.Sprintf("Successfully restored volume %s from backup %s", vol.Name, backup.ID),
-		})
-
-		s.json(w, http.StatusOK, map[string]string{"status": "restored"})
-		return
-	}
-
-	tempPath := vol.HostPath + ".tmp_restore_bak"
-	if _, err := os.Stat(vol.HostPath); err == nil {
-		if err := os.Rename(vol.HostPath, tempPath); err != nil {
-			s.error(w, http.StatusInternalServerError, "failed to move volume to safety directory: "+err.Error())
-			// Restart service if it was stopped
-			if serviceRunning {
-				s.runtime.StartContainer(r.Context(), service.RuntimeID)
-			}
-			return
-		}
-	}
-
-	// Verify checksum of backup archive
-	calcSum, err := ComputeFileSha256(backup.BackupPath)
+	err = s.runRestoreWorkflowSync(r.Context(), vol, req.BackupID)
 	if err != nil {
-		s.restoreRollback(vol.HostPath, tempPath)
-		if serviceRunning {
-			s.runtime.StartContainer(r.Context(), service.RuntimeID)
-		}
-		s.error(w, http.StatusInternalServerError, "failed to calculate backup checksum: "+err.Error())
+		s.error(w, http.StatusInternalServerError, "Restore failed: "+err.Error())
 		return
 	}
-
-	if calcSum != backup.Checksum {
-		s.restoreRollback(vol.HostPath, tempPath)
-		if serviceRunning {
-			s.runtime.StartContainer(r.Context(), service.RuntimeID)
-		}
-		s.error(w, http.StatusBadRequest, fmt.Sprintf("backup checksum mismatch: expected %s, got %s", backup.Checksum, calcSum))
-		return
-	}
-
-	// Extract backup tarball
-	if err := ExtractTarGz(backup.BackupPath, vol.HostPath); err != nil {
-		s.restoreRollback(vol.HostPath, tempPath)
-		if serviceRunning {
-			s.runtime.StartContainer(r.Context(), service.RuntimeID)
-		}
-		s.error(w, http.StatusInternalServerError, "failed to extract backup tarball: "+err.Error())
-		return
-	}
-
-	// Clean up safety folder
-	if _, err := os.Stat(tempPath); err == nil {
-		os.RemoveAll(tempPath)
-	}
-
-	// Restart service if it was running
-	if serviceRunning {
-		if err := s.runtime.StartContainer(r.Context(), service.RuntimeID); err != nil {
-			s.error(w, http.StatusInternalServerError, "restore succeeded but failed to restart service: "+err.Error())
-			return
-		}
-	}
-
-	s.store.CreateEvent(&api.Event{
-		ID:       uuid.New().String(),
-		VolumeID: &vol.ID,
-		BackupID: &backup.ID,
-		Type:     events.BackupRestored.String(),
-		Message:  fmt.Sprintf("Successfully restored volume %s from backup %s", vol.Name, backup.ID),
-	})
 
 	s.json(w, http.StatusOK, map[string]string{"status": "restored"})
 }

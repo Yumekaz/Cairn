@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/yumekaz/cairn/internal/cli"
 	"github.com/yumekaz/cairn/internal/config"
 	"github.com/yumekaz/cairn/internal/daemon"
+	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
 )
 func TestEndToEndMLP(t *testing.T) {
@@ -845,6 +847,278 @@ func TestDashboardV1(t *testing.T) {
 
 	if len(deploys) != 1 || deploys[0].ID != "test-deploy-id" {
 		t.Errorf("expected 1 deploy with ID 'test-deploy-id', got: %v", deploys)
+	}
+}
+
+type fakeRuntime struct {
+	mu         sync.Mutex
+	containers map[string]*runtime.ContainerInfo
+	onStart    func(id string)
+	blockStart bool
+}
+
+func newFakeRuntime() *fakeRuntime {
+	return &fakeRuntime{
+		containers: make(map[string]*runtime.ContainerInfo),
+	}
+}
+
+func (f *fakeRuntime) CreateContainer(ctx context.Context, cfg *api.ServiceConfig, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := name + "-id"
+	f.containers[id] = &runtime.ContainerInfo{
+		ID:        id,
+		Name:      name,
+		Image:     cfg.Image,
+		State:     runtime.StateCreated,
+		IPAddress: "127.0.0.1",
+	}
+	return id, nil
+}
+
+func (f *fakeRuntime) StartContainer(ctx context.Context, id string) error {
+	f.mu.Lock()
+	if c, ok := f.containers[id]; ok {
+		c.State = runtime.StateRunning
+	}
+	f.mu.Unlock()
+
+	if f.onStart != nil {
+		f.onStart(id)
+	}
+
+	if f.blockStart {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (f *fakeRuntime) StopContainer(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.containers[id]; ok {
+		c.State = runtime.StateStopped
+	}
+	return nil
+}
+
+func (f *fakeRuntime) RestartContainer(ctx context.Context, id string) error {
+	return nil
+}
+
+func (f *fakeRuntime) RemoveContainer(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.containers, id)
+	return nil
+}
+
+func (f *fakeRuntime) InspectContainer(ctx context.Context, id string) (*runtime.ContainerInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.containers[id]; ok {
+		return c, nil
+	}
+	return nil, fmt.Errorf("container not found: %s", id)
+}
+
+func (f *fakeRuntime) StreamLogs(ctx context.Context, id string, follow bool, tail int) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func TestDuraFlowCrashRecovery(t *testing.T) {
+	// 1. Create a temporary data directory and store for test
+	tempDir, err := os.MkdirTemp("", "cairn-test-crash-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "cairn.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	// Setup a service record
+	svc := &api.Service{
+		ID:           "test-crash-svc-id",
+		Name:         "test-crash-svc",
+		Kind:         "web",
+		DesiredState: "running",
+		ActualState:  "stopped",
+	}
+	if err := st.UpsertService(svc); err != nil {
+		t.Fatalf("failed to insert service: %v", err)
+	}
+
+	// Setup deploy record
+	deployID := "test-crash-deploy-id"
+	deploy := &api.Deploy{
+		ID:        deployID,
+		ServiceID: svc.ID,
+		Version:   "1.0.0",
+		Status:    "pending",
+		Stage:     "starting",
+	}
+	if err := st.CreateDeploy(deploy); err != nil {
+		t.Fatalf("failed to create deploy: %v", err)
+	}
+
+	// Prepare service config
+	cfg := &api.ServiceConfig{
+		Name:  "test-crash-svc",
+		Kind:  "web",
+		Image: "nginx:latest",
+		Ports: []api.PortMapping{
+			{Host: 8081, Container: 80},
+		},
+	}
+
+	// Save deploy config on disk
+	svcDir := filepath.Join(tempDir, "services", cfg.Name)
+	if err := os.MkdirAll(svcDir, 0755); err != nil {
+		t.Fatalf("failed to create service dir: %v", err)
+	}
+	cfgJSON, _ := json.Marshal(cfg)
+	cfgPath := filepath.Join(svcDir, fmt.Sprintf("deploy_%s.json", deployID))
+	if err := os.WriteFile(cfgPath, cfgJSON, 0644); err != nil {
+		t.Fatalf("failed to write deploy config: %v", err)
+	}
+
+	// 2. Setup fake runtime
+	runtimeFake := newFakeRuntime()
+	runtimeFake.blockStart = true
+	
+	// Create context to control daemon lifecycle
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	
+	// Channel to signal when to crash/cancel the first daemon instance
+	startedChan := make(chan bool, 1)
+
+	// Set onStart handler to cancel the daemon's context when container is started
+	runtimeFake.onStart = func(id string) {
+		t.Logf("Fake runtime started container: %s. Crashing daemon...", id)
+		startedChan <- true
+		cancel1()
+	}
+
+	// Setup daemon config with a random free port for DashboardAddr
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on random port: %v", err)
+	}
+	addr := listener.Addr().String()
+	listener.Close()
+
+	daemonCfg := &config.DaemonConfig{
+		SocketPath:    filepath.Join(tempDir, "cairnd.sock"),
+		DatabasePath:  dbPath,
+		DataDir:       tempDir,
+		VolumeDir:     filepath.Join(tempDir, "volumes"),
+		BackupDir:     filepath.Join(tempDir, "backups"),
+		DashboardAddr: addr,
+	}
+
+	srv1 := daemon.NewServer(daemonCfg, st, runtimeFake)
+	
+	// Start the first server in a goroutine
+	go func() {
+		_ = srv1.Start(ctx1)
+	}()
+
+	// Wait for server to initialize
+	time.Sleep(200 * time.Millisecond)
+
+	// Trigger deployment by calling POST /services
+	clientHttp := &http.Client{Timeout: 5 * time.Second}
+	postData, _ := json.Marshal(cfg)
+	
+	t.Log("Triggering initial deployment workflow...")
+	go func() {
+		resp, err := clientHttp.Post("http://"+addr+"/services", "application/json", bytes.NewBuffer(postData))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Wait for container start to signal, causing cancel1()
+	select {
+	case <-startedChan:
+		t.Log("Interrupted deploy workflow successfully. Waiting for daemon 1 to stop...")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for deployment workflow to start candidate container")
+	}
+
+	// Give daemon 1 a moment to shut down
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify that workflow status in the database is still "running" (not failed/success)
+	// Query workflows
+	wfs, err := st.ListWorkflows()
+	if err != nil {
+		t.Fatalf("failed to list workflows: %v", err)
+	}
+	if len(wfs) == 0 {
+		t.Fatal("expected at least one workflow to be registered")
+	}
+	wf := wfs[0]
+	t.Logf("Interrupted workflow status: %s, CurrentStepIndex: %d", wf.Status, wf.CurrentStepIndex)
+	if wf.Status != "running" {
+		t.Errorf("expected workflow status to be 'running', got '%s'", wf.Status)
+	}
+
+	// 3. Start a second daemon instance in-process to reconcile and complete deployment
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	// In the second daemon, we change the fake runtime's start container behavior so it doesn't block,
+	// allowing the resumed workflow to complete.
+	runtimeFake2 := newFakeRuntime()
+	runtimeFake2.blockStart = false
+	// Re-add container info so the inspect works on resumed run
+	runtimeFake2.CreateContainer(context.Background(), cfg, fmt.Sprintf("cairn-test-crash-svc-%s", wf.ID[:8]))
+
+	srv2 := daemon.NewServer(daemonCfg, st, runtimeFake2)
+	
+	t.Log("Starting daemon 2 to perform reconciliation...")
+	go func() {
+		_ = srv2.Start(ctx2)
+	}()
+
+	// Poll the database to verify the workflow is picked up, resumed, and completed successfully
+	t.Log("Polling workflow completion status...")
+	completed := false
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		wfUpdated, err := st.GetWorkflow(wf.ID)
+		if err == nil && wfUpdated != nil {
+			t.Logf("Polled workflow status: %s, step index: %d", wfUpdated.Status, wfUpdated.CurrentStepIndex)
+			if wfUpdated.Status == "success" {
+				completed = true
+				break
+			}
+			if wfUpdated.Status == "failed" {
+				t.Fatalf("Resumed workflow failed: %v", wfUpdated)
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if !completed {
+		t.Fatal("Timeout waiting for resumed workflow to complete successfully")
+	}
+
+	t.Log("Workflow completed successfully after reconciliation! Verifying final service state...")
+	updatedSvc, err := st.GetService(svc.ID)
+	if err != nil {
+		t.Fatalf("failed to retrieve service: %v", err)
+	}
+	if updatedSvc.ActualState != "running" {
+		t.Errorf("expected service actual state 'running', got '%s'", updatedSvc.ActualState)
 	}
 }
 

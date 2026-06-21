@@ -146,3 +146,27 @@ type DaemonStatus struct {
 	ActiveServices int    `json:"active_services"`
 	StorageUsage   string `json:"storage_usage"`
 }
+
+// Workflow represents a durable execution state.
+type Workflow struct {
+	ID               string          `json:"id" db:"id"`
+	Type             string          `json:"type" db:"type"`
+	Status           string          `json:"status" db:"status"` // pending, running, success, failed
+	CurrentStepIndex int             `json:"current_step_index" db:"current_step_index"`
+	InputJSON        string          `json:"input_json" db:"input_json"`
+	CreatedAt        time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at" db:"updated_at"`
+	Steps            []*WorkflowStep `json:"steps,omitempty"`
+}
+
+// WorkflowStep represents an execution step inside a durable workflow.
+type WorkflowStep struct {
+	ID           string    `json:"id" db:"id"`
+	WorkflowID   string    `json:"workflow_id" db:"workflow_id"`
+	StepIndex    int       `json:"step_index" db:"step_index"`
+	Name         string    `json:"name" db:"name"`
+	Status       string    `json:"status" db:"status"` // pending, running, success, failed
+	ErrorMessage string    `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
+}

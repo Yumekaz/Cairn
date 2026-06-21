@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/yumekaz/cairn/internal/config"
+	"github.com/yumekaz/cairn/internal/duraflow"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
 )
@@ -23,6 +24,7 @@ type Server struct {
 	runtime   runtime.RuntimeBackend
 	config    *config.DaemonConfig
 	startTime time.Time
+	duraflow  *duraflow.Engine
 }
 
 // NewServer initializes the Daemon API Server.
@@ -34,6 +36,9 @@ func NewServer(cfg *config.DaemonConfig, s *store.Store, r runtime.RuntimeBacken
 		config:    cfg,
 		startTime: time.Now(),
 	}
+
+	srv.duraflow = duraflow.NewEngine(s, r)
+	srv.RegisterDuraFlowTemplates(srv.duraflow)
 
 	srv.setupMiddleware()
 	srv.setupRoutes()
@@ -75,6 +80,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// Start background cron scheduler
 	sched := NewScheduler(s.store, s.runtime, s.config.DataDir)
 	go sched.Start(ctx)
+
+	// Reconcile and resume active workflows
+	go s.duraflow.ReconcileActiveWorkflows()
 
 	// Start secondary TCP server for dashboard/API if configured
 	if s.config.DashboardAddr != "" {
