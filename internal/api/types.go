@@ -145,6 +145,8 @@ type DaemonStatus struct {
 	Version        string `json:"version"`
 	ActiveServices int    `json:"active_services"`
 	StorageUsage   string `json:"storage_usage"`
+	DiskWarning    string `json:"disk_warning,omitempty"`
+	DiskFree       string `json:"disk_free,omitempty"`
 }
 
 // Workflow represents a durable execution state.

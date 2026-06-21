@@ -928,6 +928,16 @@ func (f *fakeRuntime) StreamLogs(ctx context.Context, id string, follow bool, ta
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
+func (f *fakeRuntime) ListContainers(ctx context.Context) ([]*runtime.ContainerInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var list []*runtime.ContainerInfo
+	for _, c := range f.containers {
+		list = append(list, c)
+	}
+	return list, nil
+}
+
 func TestDuraFlowCrashRecovery(t *testing.T) {
 	// 1. Create a temporary data directory and store for test
 	tempDir, err := os.MkdirTemp("", "cairn-test-crash-*")
@@ -1121,5 +1131,193 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 		t.Errorf("expected service actual state 'running', got '%s'", updatedSvc.ActualState)
 	}
 }
+
+func TestReliabilityHardening(t *testing.T) {
+	// 1. Create a temporary data directory and store for test
+	tempDir, err := os.MkdirTemp("", "cairn-test-reliability-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "cairn.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	// 2. Setup fake runtime
+	runtimeFake := newFakeRuntime()
+
+	// 3. Initialize daemon config
+	daemonCfg := &config.DaemonConfig{
+		SocketPath:   filepath.Join(tempDir, "cairnd.sock"),
+		DatabasePath: dbPath,
+		DataDir:      tempDir,
+		VolumeDir:    filepath.Join(tempDir, "volumes"),
+		BackupDir:    filepath.Join(tempDir, "backups"),
+	}
+
+	srv := daemon.NewServer(daemonCfg, st, runtimeFake)
+	ctx := context.Background()
+
+	// --- TEST CASE 1: Host Reboot / Container Recreation Recovery ---
+	t.Run("RebootRecovery", func(t *testing.T) {
+		// Setup a service record with desired state = running and current deploy ID
+		deployID := "deploy-reboot-id-12345"
+		svc := &api.Service{
+			ID:              "svc-reboot-id",
+			Name:            "svc-reboot",
+			Kind:            "web",
+			CurrentDeployID: deployID,
+			DesiredState:    "running",
+			ActualState:     "stopped",
+		}
+		if err := st.UpsertService(svc); err != nil {
+			t.Fatalf("failed to upsert service: %v", err)
+		}
+
+		// Prepare and save the deploy config file
+		cfg := &api.ServiceConfig{
+			Name:  "svc-reboot",
+			Kind:  "web",
+			Image: "nginx:alpine",
+			Ports: []api.PortMapping{
+				{Host: 8085, Container: 80},
+			},
+		}
+		svcDir := filepath.Join(tempDir, "services", cfg.Name)
+		if err := os.MkdirAll(svcDir, 0755); err != nil {
+			t.Fatalf("failed to create service dir: %v", err)
+		}
+		cfgJSON, _ := json.Marshal(cfg)
+		cfgPath := filepath.Join(svcDir, fmt.Sprintf("deploy_%s.json", deployID))
+		if err := os.WriteFile(cfgPath, cfgJSON, 0644); err != nil {
+			t.Fatalf("failed to write deploy config: %v", err)
+		}
+
+		// Reconcile immediately: should create and start the container
+		srv.ReconcileServices(ctx)
+
+		// Assert that the container exists in fake runtime and has StateRunning
+		updatedSvc, err := st.GetService(svc.ID)
+		if err != nil {
+			t.Fatalf("failed to get service: %v", err)
+		}
+		if updatedSvc.RuntimeID == "" {
+			t.Fatalf("expected service to have a runtime ID assigned after reconciliation")
+		}
+
+		c, err := runtimeFake.InspectContainer(ctx, updatedSvc.RuntimeID)
+		if err != nil {
+			t.Fatalf("failed to inspect container: %v", err)
+		}
+		if c.State != runtime.StateRunning {
+			t.Errorf("expected container to be running, got: %s", c.State)
+		}
+		if updatedSvc.ActualState != "running" {
+			t.Errorf("expected service actual state to be running, got: %s", updatedSvc.ActualState)
+		}
+
+		// Now simulate container stopped (e.g. host rebooted, container stopped but not removed)
+		runtimeFake.StopContainer(ctx, updatedSvc.RuntimeID)
+
+		// Reconcile: should restart it
+		srv.ReconcileServices(ctx)
+
+		c, err = runtimeFake.InspectContainer(ctx, updatedSvc.RuntimeID)
+		if err != nil {
+			t.Fatalf("failed to inspect container: %v", err)
+		}
+		if c.State != runtime.StateRunning {
+			t.Errorf("expected container to be restarted/running, got: %s", c.State)
+		}
+	})
+
+	// --- TEST CASE 2: Dangling Container Cleanup ---
+	t.Run("DanglingContainerCleanup", func(t *testing.T) {
+		// Create a container directly in fake runtime starting with "cairn-"
+		danglingID := "cairn-dangling-123-id"
+		runtimeFake.mu.Lock()
+		runtimeFake.containers[danglingID] = &runtime.ContainerInfo{
+			ID:        danglingID,
+			Name:      "cairn-dangling-123",
+			Image:     "nginx:alpine",
+			State:     runtime.StateRunning,
+			IPAddress: "127.0.0.1",
+		}
+		runtimeFake.mu.Unlock()
+
+		// Run reconciliation
+		srv.ReconcileServices(ctx)
+
+		// Verify container was removed
+		runtimeFake.mu.Lock()
+		_, exists := runtimeFake.containers[danglingID]
+		runtimeFake.mu.Unlock()
+
+		if exists {
+			t.Errorf("expected dangling container to be removed by reconciliation")
+		}
+	})
+
+	// --- TEST CASE 3: Metadata Backup and Pruning ---
+	t.Run("MetadataBackup", func(t *testing.T) {
+		// Verify BackupMetadata works
+		err := srv.BackupMetadata()
+		if err != nil {
+			t.Fatalf("BackupMetadata failed: %v", err)
+		}
+
+		backupDir := filepath.Join(tempDir, "backups", "metadata")
+		files, err := os.ReadDir(backupDir)
+		if err != nil {
+			t.Fatalf("failed to read backup dir: %v", err)
+		}
+		if len(files) != 1 {
+			t.Errorf("expected exactly 1 backup, got %d", len(files))
+		}
+
+		// Create 6 dummy backups with different timestamps to test pruning (keeping 5 most recent + the one just made)
+		for _, f := range files {
+			_ = os.Remove(filepath.Join(backupDir, f.Name()))
+		}
+
+		// Write 6 dummy backup files
+		for i := 1; i <= 6; i++ {
+			dummyName := fmt.Sprintf("cairn_20260621_12000%d.db", i)
+			dummyPath := filepath.Join(backupDir, dummyName)
+			if err := os.WriteFile(dummyPath, []byte("dummy-db-content"), 0644); err != nil {
+				t.Fatalf("failed to write dummy backup: %v", err)
+			}
+		}
+
+		// Run BackupMetadata again: it will write a new one (timestamp format matches time.Now())
+		// and prune the oldest ones, keeping exactly 5 most recent in total.
+		err = srv.BackupMetadata()
+		if err != nil {
+			t.Fatalf("BackupMetadata failed: %v", err)
+		}
+
+		files, err = os.ReadDir(backupDir)
+		if err != nil {
+			t.Fatalf("failed to read backup dir: %v", err)
+		}
+
+		// Total should be exactly 5
+		if len(files) != 5 {
+			t.Errorf("expected exactly 5 backups after pruning, got %d", len(files))
+		}
+
+		// Verify the oldest ones were removed
+		for _, f := range files {
+			if f.Name() == "cairn_20260621_120001.db" || f.Name() == "cairn_20260621_120002.db" {
+				t.Errorf("backup file %s should have been pruned", f.Name())
+			}
+		}
+	})
+}
+
 
 

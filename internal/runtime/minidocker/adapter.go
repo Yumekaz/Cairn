@@ -184,3 +184,53 @@ func (a *MiniDockerAdapter) StreamLogs(ctx context.Context, id string, follow bo
 	}
 	return stream, nil
 }
+
+// ListContainers lists all containers in Mini-Docker.
+func (a *MiniDockerAdapter) ListContainers(ctx context.Context) ([]*runtime.ContainerInfo, error) {
+	var list []MiniDockerContainer
+	err := a.client.Get(ctx, "/containers/json", &list)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers via Mini-Docker: %w", err)
+	}
+
+	var infos []*runtime.ContainerInfo
+	for _, c := range list {
+		var state runtime.ContainerState
+		switch strings.ToLower(c.Status) {
+		case "created":
+			state = runtime.StateCreated
+		case "running":
+			state = runtime.StateRunning
+		case "stopped", "exited":
+			state = runtime.StateStopped
+		default:
+			state = runtime.StateError
+		}
+
+		var ports []api.PortMapping
+		for _, portStr := range c.Network.Ports {
+			parts := strings.Split(portStr, ":")
+			if len(parts) == 2 {
+				hostPort, err1 := strconv.Atoi(parts[0])
+				containerPort, err2 := strconv.Atoi(parts[1])
+				if err1 == nil && err2 == nil {
+					ports = append(ports, api.PortMapping{
+						Host:      hostPort,
+						Container: containerPort,
+					})
+				}
+			}
+		}
+
+		infos = append(infos, &runtime.ContainerInfo{
+			ID:        c.ID,
+			Name:      c.Name,
+			Image:     c.RootFS,
+			State:     state,
+			IPAddress: c.Network.IP,
+			Ports:     ports,
+			ExitCode:  c.ExitCode,
+		})
+	}
+	return infos, nil
+}

@@ -28,6 +28,12 @@ var statusCmd = &cobra.Command{
 		fmt.Printf("Uptime:         %s\n", daemonStatus.Uptime)
 		fmt.Printf("Active Services:%d\n", daemonStatus.ActiveServices)
 		fmt.Printf("Storage Usage:  %s\n", daemonStatus.StorageUsage)
+		if daemonStatus.DiskFree != "" {
+			fmt.Printf("Disk Free:      %s\n", daemonStatus.DiskFree)
+		}
+		if daemonStatus.DiskWarning != "" {
+			fmt.Printf("Disk Warning:   %s\n", daemonStatus.DiskWarning)
+		}
 		fmt.Println()
 
 		// 2. Get registered services

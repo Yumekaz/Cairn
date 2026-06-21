@@ -37,4 +37,5 @@ type RuntimeBackend interface {
 	RemoveContainer(ctx context.Context, id string) error
 	InspectContainer(ctx context.Context, id string) (*ContainerInfo, error)
 	StreamLogs(ctx context.Context, id string, follow bool, tail int) (io.ReadCloser, error)
+	ListContainers(ctx context.Context) ([]*ContainerInfo, error)
 }

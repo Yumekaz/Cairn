@@ -20,6 +20,7 @@ import (
 	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 func (s *Server) setupRoutes() {
@@ -101,11 +102,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		totalBytes += getDirSize(s.config.BackupDir)
 	}
 
+	var diskWarning string
+	var diskFree string
+	var stat unix.Statfs_t
+	if err := unix.Statfs(s.config.DataDir, &stat); err == nil {
+		total := stat.Blocks * uint64(stat.Bsize)
+		avail := stat.Bavail * uint64(stat.Bsize)
+		diskFree = formatSize(int64(avail))
+		if (total > 0 && avail*100/total < 10) || avail < 1024*1024*1024 {
+			diskWarning = fmt.Sprintf("Low disk space: only %s available", diskFree)
+		}
+	}
+
 	status := api.DaemonStatus{
 		Uptime:         time.Since(s.startTime).Truncate(time.Second).String(),
 		Version:        "0.1.0",
 		ActiveServices: activeCount,
 		StorageUsage:   formatSize(totalBytes),
+		DiskWarning:    diskWarning,
+		DiskFree:       diskFree,
 	}
 
 	s.json(w, http.StatusOK, status)
