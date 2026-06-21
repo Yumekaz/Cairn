@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,7 +20,6 @@ import (
 	"github.com/yumekaz/cairn/internal/daemon"
 	"github.com/yumekaz/cairn/internal/store"
 )
-
 func TestEndToEndMLP(t *testing.T) {
 	// 1. Check if the cairnd daemon socket exists. If not, skip integration tests.
 	homeDir, err := os.UserHomeDir()
@@ -533,3 +533,181 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 		t.Error("expected schedule to match test time (June 22, 2026 02:05:00)")
 	}
 }
+
+func TestDatabaseServiceDumpAndRestore(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/home/yumekaz"
+	}
+	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
+
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Skip("Cairn daemon socket does not exist. Skipping integration tests.")
+	}
+
+	// 1. Mock pg_dump and psql scripts inside rootfs
+	pgDumpPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/pg_dump"
+	psqlPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/psql"
+
+	pgDumpScript := `#!/bin/sh
+echo "INSERT INTO test VALUES ('recovered-row');" > /backup_vol/backup_dump.sql
+`
+	psqlScript := `#!/bin/sh
+cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
+`
+	if err := os.WriteFile(pgDumpPath, []byte(pgDumpScript), 0755); err != nil {
+		t.Fatalf("failed to write mock pg_dump: %v", err)
+	}
+	defer os.Remove(pgDumpPath)
+
+	if err := os.WriteFile(psqlPath, []byte(psqlScript), 0755); err != nil {
+		t.Fatalf("failed to write mock psql: %v", err)
+	}
+	defer os.Remove(psqlPath)
+
+	client := cli.NewDaemonClient(socketPath)
+	ctx := context.Background()
+
+	// Clean up any existing volume folder for integration-db-vol
+	volPath := filepath.Join(homeDir, ".cairn", "volumes", "integration-db-vol")
+	os.RemoveAll(volPath)
+
+	// 2. Deploy database service
+	postgresCfg := &api.ServiceConfig{
+		Name:      "integration-db",
+		Kind:      "postgres",
+		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command:   []string{"/bin/busybox", "sleep", "3600"},
+		Volumes: []api.VolumeConfig{
+			{Name: "integration-db-vol", MountPath: "/backup_vol"},
+		},
+		Environment: map[string]string{
+			"POSTGRES_USER":     "myuser",
+			"POSTGRES_PASSWORD": "mypassword",
+			"POSTGRES_DB":       "mydb",
+		},
+	}
+
+	t.Log("Deploying integration-db service...")
+	var dbSvc api.Service
+	err = client.Post(ctx, "/services", postgresCfg, &dbSvc)
+	if err != nil {
+		t.Fatalf("failed to deploy database service: %v", err)
+	}
+	defer client.Delete(ctx, "/services/integration-db", nil)
+
+	// Assert route is N/A
+	if dbSvc.Route != "N/A" {
+		t.Errorf("expected database service route to be 'N/A', got '%s'", dbSvc.Route)
+	}
+
+	// 3. Deploy client service (uses dynamic IP resolution)
+	clientCfg := &api.ServiceConfig{
+		Name:      "client-service",
+		Kind:      "web",
+		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command:   []string{"/bin/busybox", "sleep", "3600"},
+		Environment: map[string]string{
+			"DATABASE_URL": "postgres://myuser:mypassword@integration-db:5432/mydb",
+		},
+	}
+
+	t.Log("Deploying client-service...")
+	var clientSvc api.Service
+	err = client.Post(ctx, "/services", clientCfg, &clientSvc)
+	if err != nil {
+		t.Fatalf("failed to deploy client service: %v", err)
+	}
+	defer client.Delete(ctx, "/services/client-service", nil)
+
+	// 4. Verify resolved environment variables
+	dbInfoPath := filepath.Join("/var/lib/mini-docker/containers", dbSvc.RuntimeID, "config.json")
+	dbInfoBytes, err := os.ReadFile(dbInfoPath)
+	if err != nil {
+		t.Fatalf("failed to read db container config: %v", err)
+	}
+	var dbConfig struct {
+		Network struct {
+			IP string `json:"ip"`
+		} `json:"network"`
+	}
+	if err := json.Unmarshal(dbInfoBytes, &dbConfig); err != nil {
+		t.Fatalf("failed to parse db container config: %v", err)
+	}
+	dbIP := dbConfig.Network.IP
+	t.Logf("Database service IP is: %s", dbIP)
+
+	clientInfoPath := filepath.Join("/var/lib/mini-docker/containers", clientSvc.RuntimeID, "config.json")
+	clientInfoBytes, err := os.ReadFile(clientInfoPath)
+	if err != nil {
+		t.Fatalf("failed to read client container config: %v", err)
+	}
+	var clientConfig struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(clientInfoBytes, &clientConfig); err != nil {
+		t.Fatalf("failed to parse client container config: %v", err)
+	}
+
+	resolvedURL := clientConfig.Env["DATABASE_URL"]
+	t.Logf("Resolved DATABASE_URL: %s", resolvedURL)
+	expectedURL := fmt.Sprintf("postgres://myuser:mypassword@%s:5432/mydb", dbIP)
+	if resolvedURL != expectedURL {
+		t.Errorf("expected resolved DATABASE_URL to be '%s', got '%s'", expectedURL, resolvedURL)
+	}
+
+	// 5. Write some simulated data to volume path
+	testFileHostPath := filepath.Join(volPath, "test_rows.txt")
+	if err := os.MkdirAll(volPath, 0755); err != nil {
+		t.Fatalf("failed to create volume path: %v", err)
+	}
+	initialData := "recovered-row"
+	if err := os.WriteFile(testFileHostPath, []byte(initialData), 0644); err != nil {
+		t.Fatalf("failed to write test data: %v", err)
+	}
+
+	// 6. Trigger logical backup
+	t.Log("Triggering logical database dump backup...")
+	var backup api.Backup
+	backupCreatePath := "/volumes/integration-db-vol/backups"
+	err = client.Post(ctx, backupCreatePath, nil, &backup)
+	if err != nil {
+		t.Fatalf("failed to trigger backup: %v", err)
+	}
+	t.Logf("Logical backup created: %s (Status: %s)", backup.ID, backup.Status)
+	if backup.Status != "success" {
+		t.Fatalf("expected backup status 'success', got '%s'", backup.Status)
+	}
+
+	// 7. Corrupt test database rows (delete the file)
+	t.Log("Corrupting test database rows...")
+	os.Remove(testFileHostPath)
+
+	// 8. Trigger logical restore
+	t.Log("Triggering logical database restore...")
+	restoreReq := map[string]string{
+		"backup_id": backup.ID,
+	}
+	var restoreResp struct {
+		Status string `json:"status"`
+	}
+	restorePath := "/volumes/integration-db-vol/restore"
+	err = client.Post(ctx, restorePath, restoreReq, &restoreResp)
+	if err != nil {
+		t.Fatalf("failed to trigger restore: %v", err)
+	}
+	t.Logf("Restore completed: %s", restoreResp.Status)
+
+	// 9. Verify restored data
+	restoredFileHostPath := filepath.Join(volPath, "restored_rows.txt")
+	restoredBytes, err := os.ReadFile(restoredFileHostPath)
+	if err != nil {
+		t.Fatalf("failed to read restored rows file: %v", err)
+	}
+	restoredData := string(restoredBytes)
+	t.Logf("Restored rows content:\n%s", restoredData)
+	if !strings.Contains(restoredData, "recovered-row") {
+		t.Errorf("expected restored rows to contain '%s', got '%s'", initialData, restoredData)
+	}
+}
+

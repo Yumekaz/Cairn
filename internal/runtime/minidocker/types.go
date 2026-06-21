@@ -5,6 +5,7 @@ type CreateContainerRequest struct {
 	Image      string            `json:"Image"`
 	Cmd        []string          `json:"Cmd,omitempty"`
 	Name       string            `json:"name"`
+	Env        []string          `json:"Env,omitempty"`
 	HostConfig CreateHostConfig  `json:"HostConfig,omitempty"`
 }
 

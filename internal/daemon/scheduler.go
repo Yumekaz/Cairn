@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -280,7 +281,7 @@ func (s *Scheduler) ExecuteCronJob(ctx context.Context, cj *api.CronJob) error {
 		Kind:        cfg.Kind,
 		Image:       cfg.Image,
 		Command:     []string{"/bin/sh", "-c", cj.Command},
-		Environment: cfg.Environment,
+		Environment: s.resolveEnvPlaceholders(ctx, cfg.Environment),
 		Volumes:     cfg.Volumes,
 	}
 
@@ -370,4 +371,39 @@ func (s *Scheduler) failJobRun(jr *api.JobRun, reason string) {
 	now := time.Now()
 	jr.FinishedAt = &now
 	s.store.UpdateJobRun(jr)
+}
+
+func (s *Scheduler) resolveEnvPlaceholders(ctx context.Context, env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	resolved := make(map[string]string)
+	// Fetch all services from database to know their names
+	services, err := s.store.ListServices()
+	if err != nil {
+		for k, v := range env {
+			resolved[k] = v
+		}
+		return resolved
+	}
+
+	// Sort services by name length in descending order to avoid substring mismatch (e.g. replace "mongo-db" before "db")
+	sort.Slice(services, func(i, j int) bool {
+		return len(services[i].Name) > len(services[j].Name)
+	})
+
+	for k, v := range env {
+		val := v
+		for _, svc := range services {
+			if svc.RuntimeID != "" && strings.Contains(val, svc.Name) {
+				// Inspect the container to get its current IP
+				info, err := s.runtime.InspectContainer(ctx, svc.RuntimeID)
+				if err == nil && info.IPAddress != "" {
+					val = strings.ReplaceAll(val, svc.Name, info.IPAddress)
+				}
+			}
+		}
+		resolved[k] = val
+	}
+	return resolved
 }

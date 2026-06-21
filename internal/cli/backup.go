@@ -12,22 +12,22 @@ import (
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
-	Short: "Manage volume backups",
+	Short: "Manage volume and database service backups",
 }
 
 var backupCreateCmd = &cobra.Command{
-	Use:   "create [volume_name]",
-	Short: "Create a manual backup snapshot of a volume",
+	Use:   "create [volume_name_or_service_name]",
+	Short: "Create a manual backup snapshot of a volume or database service",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		volumeName := args[0]
+		targetName := args[0]
 		client := NewDaemonClient(SocketPath)
 		ctx := context.Background()
 
-		fmt.Printf("Starting backup for volume '%s'...\n", volumeName)
+		fmt.Printf("Starting backup for '%s'...\n", targetName)
 
 		var backup api.Backup
-		path := fmt.Sprintf("/volumes/%s/backups", volumeName)
+		path := fmt.Sprintf("/volumes/%s/backups", targetName)
 		if err := client.Post(ctx, path, nil, &backup); err != nil {
 			return err
 		}
@@ -42,22 +42,22 @@ var backupCreateCmd = &cobra.Command{
 }
 
 var backupListCmd = &cobra.Command{
-	Use:   "list [volume_name]",
-	Short: "List all backups for a volume",
+	Use:   "list [volume_name_or_service_name]",
+	Short: "List all backups for a volume or database service",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		volumeName := args[0]
+		targetName := args[0]
 		client := NewDaemonClient(SocketPath)
 		ctx := context.Background()
 
 		var backups []*api.Backup
-		path := fmt.Sprintf("/volumes/%s/backups", volumeName)
+		path := fmt.Sprintf("/volumes/%s/backups", targetName)
 		if err := client.Get(ctx, path, &backups); err != nil {
 			return err
 		}
 
 		if len(backups) == 0 {
-			fmt.Printf("No backups found for volume '%s'.\n", volumeName)
+			fmt.Printf("No backups found for '%s'.\n", targetName)
 			return nil
 		}
 

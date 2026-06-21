@@ -48,10 +48,16 @@ func (a *MiniDockerAdapter) CreateContainer(ctx context.Context, cfg *api.Servic
 		binds = append(binds, fmt.Sprintf("%s:%s:rw", hostPath, vol.MountPath))
 	}
 
+	var envs []string
+	for k, v := range cfg.Environment {
+		envs = append(envs, fmt.Sprintf("%s=%s", k, v))
+	}
+
 	req := CreateContainerRequest{
 		Image: cfg.Image,
 		Cmd:   cfg.Command,
 		Name:  name,
+		Env:   envs,
 		HostConfig: CreateHostConfig{
 			PortBindings: portBindings,
 			Binds:        binds,

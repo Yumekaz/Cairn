@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -15,10 +16,6 @@ func RunHealthCheck(ctx context.Context, hc *api.HealthCheckConfig, ipAddress st
 		return nil // No health check configured, default to success
 	}
 
-	path := hc.HTTPPath
-	if path == "" {
-		path = "/"
-	}
 	interval := hc.Interval
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -32,8 +29,6 @@ func RunHealthCheck(ctx context.Context, hc *api.HealthCheckConfig, ipAddress st
 		retries = 3
 	}
 
-	url := fmt.Sprintf("http://%s:%d%s", ipAddress, containerPort, path)
-
 	// Wait for startup grace period if configured
 	if hc.StartupGrace > 0 {
 		select {
@@ -42,6 +37,34 @@ func RunHealthCheck(ctx context.Context, hc *api.HealthCheckConfig, ipAddress st
 		case <-time.After(hc.StartupGrace):
 		}
 	}
+
+	if hc.HTTPPath == "TCP" {
+		var lastErr error
+		for i := 0; i < retries; i++ {
+			d := net.Dialer{Timeout: timeout}
+			conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", ipAddress, containerPort))
+			if err == nil {
+				conn.Close()
+				return nil // Container is healthy
+			}
+			lastErr = err
+
+			if i < retries-1 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(interval):
+				}
+			}
+		}
+		return fmt.Errorf("TCP health check failed for %s:%d: %w", ipAddress, containerPort, lastErr)
+	}
+
+	path := hc.HTTPPath
+	if path == "" {
+		path = "/"
+	}
+	url := fmt.Sprintf("http://%s:%d%s", ipAddress, containerPort, path)
 
 	client := &http.Client{
 		Timeout: timeout,

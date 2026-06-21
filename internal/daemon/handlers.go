@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -282,9 +283,10 @@ func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, depl
 			s.failDeploy(deploy, svc, "Validation failed: invalid cron schedule: "+err.Error())
 			return nil, fmt.Errorf("invalid cron schedule: %w", err)
 		}
-	} else if cfg.Kind == "worker" {
-		// Workers don't map ports
+	} else if cfg.Kind == "worker" || cfg.Kind == "postgres" || cfg.Kind == "redis" || cfg.Kind == "db" {
+		// Workers and DBs bypass port mapping / proxy routing by setting Ports = nil
 		cfg.Ports = nil
+		_ = s.store.DeleteCronJobByName(svc.Name)
 	} else {
 		// Clean up any stale cron jobs for this service if we are deploying a non-cron version
 		_ = s.store.DeleteCronJobByName(svc.Name)
@@ -339,7 +341,7 @@ func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, depl
 			Kind:        cfg.Kind,
 			Image:       cfg.Image,
 			Command:     []string{"/bin/sh", "-c", cfg.Migration},
-			Environment: cfg.Environment,
+			Environment: s.resolveEnvPlaceholders(ctx, cfg.Environment),
 			Volumes:     cfg.Volumes,
 		}
 
@@ -454,6 +456,9 @@ func (s *Server) runDeployFlow(ctx context.Context, cfg *api.ServiceConfig, depl
 	}
 
 	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
+
+	// Resolve dynamic IP variables in Environment config
+	cfg.Environment = s.resolveEnvPlaceholders(ctx, cfg.Environment)
 
 	// Create candidate container in Mini-Docker
 	candidateID, err := s.runtime.CreateContainer(ctx, cfg, candidateName)
@@ -578,7 +583,36 @@ func (s *Server) performVolumeBackup(vol *api.Volume) (*api.Backup, error) {
 		Message:  fmt.Sprintf("Started backup for volume %s (ID: %s)", vol.Name, backupID),
 	})
 
-	checksum, sizeBytes, err := CreateTarGz(vol.HostPath, backupPath)
+	var isPostgresRunning bool
+	var dbService *api.Service
+	var dbServiceConfig *api.ServiceConfig
+
+	if vol.AttachedServiceID != "" {
+		svc, err := s.store.GetService(vol.AttachedServiceID)
+		if err == nil && svc != nil && svc.Kind == "postgres" && svc.ActualState == "running" && svc.RuntimeID != "" {
+			cfgPath := filepath.Join(s.config.DataDir, "services", svc.Name, fmt.Sprintf("deploy_%s.json", svc.CurrentDeployID))
+			cfgJSON, err := os.ReadFile(cfgPath)
+			if err == nil {
+				var cfg api.ServiceConfig
+				if err := json.Unmarshal(cfgJSON, &cfg); err == nil {
+					isPostgresRunning = true
+					dbService = svc
+					dbServiceConfig = &cfg
+				}
+			}
+		}
+	}
+
+	var checksum string
+	var sizeBytes int64
+	var err error
+
+	if isPostgresRunning {
+		checksum, sizeBytes, err = s.performPostgresDumpBackup(vol, dbService, dbServiceConfig, backupPath, backupID)
+	} else {
+		checksum, sizeBytes, err = CreateTarGz(vol.HostPath, backupPath)
+	}
+
 	if err != nil {
 		b.Status = "failed"
 		b.FailureReason = err.Error()
@@ -594,7 +628,7 @@ func (s *Server) performVolumeBackup(vol *api.Volume) (*api.Backup, error) {
 			Message:  fmt.Sprintf("Backup failed for volume %s: %v", vol.Name, err),
 		})
 
-		return b, fmt.Errorf("failed to create tarball: %w", err)
+		return b, fmt.Errorf("failed to create backup: %w", err)
 	}
 
 	b.Status = "success"
@@ -615,6 +649,95 @@ func (s *Server) performVolumeBackup(vol *api.Volume) (*api.Backup, error) {
 	})
 
 	return b, nil
+}
+
+func (s *Server) performPostgresDumpBackup(vol *api.Volume, dbService *api.Service, dbServiceConfig *api.ServiceConfig, backupPath string, backupID string) (string, int64, error) {
+	dbInfo, err := s.runtime.InspectContainer(context.Background(), dbService.RuntimeID)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to inspect database container: %w", err)
+	}
+	dbIP := dbInfo.IPAddress
+
+	user := dbServiceConfig.Environment["POSTGRES_USER"]
+	if user == "" {
+		user = "postgres"
+	}
+	password := dbServiceConfig.Environment["POSTGRES_PASSWORD"]
+	dbname := dbServiceConfig.Environment["POSTGRES_DB"]
+	if dbname == "" {
+		dbname = user
+	}
+
+	dumpFileHostPath := filepath.Join(vol.HostPath, "backup_dump.sql")
+	os.Remove(dumpFileHostPath)
+
+	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
+	taskCfg := &api.ServiceConfig{
+		Name:        dbServiceConfig.Name,
+		Kind:        dbServiceConfig.Kind,
+		Image:       dbServiceConfig.Image,
+		Command:     []string{"sh", "-c", fmt.Sprintf("pg_dump -h %s -U %s -d %s -f /backup_vol/backup_dump.sql", dbIP, user, dbname)},
+		Environment: map[string]string{
+			"PGPASSWORD": password,
+		},
+		Volumes: []api.VolumeConfig{
+			{
+				Name:      vol.Name,
+				MountPath: "/backup_vol",
+			},
+		},
+	}
+
+	taskID, err := s.runtime.CreateContainer(context.Background(), taskCfg, taskName)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create backup task container: %w", err)
+	}
+	defer s.runtime.RemoveContainer(context.Background(), taskID)
+
+	if err := s.runtime.StartContainer(context.Background(), taskID); err != nil {
+		return "", 0, fmt.Errorf("failed to start backup task container: %w", err)
+	}
+
+	var exitCode int
+	var runErr error
+	for {
+		info, err := s.runtime.InspectContainer(context.Background(), taskID)
+		if err != nil {
+			runErr = err
+			break
+		}
+		if info.State == runtime.StateStopped || info.State == runtime.StateError {
+			if info.ExitCode != nil {
+				exitCode = *info.ExitCode
+			} else {
+				exitCode = -1
+			}
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if runErr != nil {
+		return "", 0, fmt.Errorf("backup execution context failed: %w", runErr)
+	}
+
+	if exitCode != 0 {
+		logs := s.getContainerLogs(context.Background(), taskID)
+		return "", 0, fmt.Errorf("backup task failed with exit code %d. Logs: %s", exitCode, logs)
+	}
+
+	if _, err := os.Stat(dumpFileHostPath); err != nil {
+		return "", 0, fmt.Errorf("logical backup file was not created: %w", err)
+	}
+
+	checksum, sizeBytes, err := CompressFileToGzip(dumpFileHostPath, backupPath)
+	os.Remove(dumpFileHostPath)
+
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to compress logical backup dump: %w", err)
+	}
+
+	return checksum, sizeBytes, nil
 }
 
 func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
@@ -997,15 +1120,47 @@ func (s *Server) handleGetVolume(w http.ResponseWriter, r *http.Request) {
 	s.json(w, http.StatusOK, vol)
 }
 
+func (s *Server) resolveVolumeOrServiceVolume(name string) (*api.Volume, error) {
+	// First check if it is a volume name
+	vol, err := s.store.GetVolumeByName(name)
+	if err != nil {
+		return nil, err
+	}
+	if vol != nil {
+		return vol, nil
+	}
+
+	// If not found, check if it's a service name
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		return nil, err
+	}
+	if svc == nil {
+		return nil, nil // neither exists
+	}
+
+	// If it's a service, find volumes attached to this service ID
+	vols, err := s.store.ListVolumes()
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range vols {
+		if v.AttachedServiceID == svc.ID {
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("service %s has no attached volumes", name)
+}
+
 func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	vol, err := s.store.GetVolumeByName(name)
+	vol, err := s.resolveVolumeOrServiceVolume(name)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if vol == nil {
-		s.error(w, http.StatusNotFound, "volume not found")
+		s.error(w, http.StatusNotFound, "volume or service not found")
 		return
 	}
 
@@ -1020,13 +1175,13 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	vol, err := s.store.GetVolumeByName(name)
+	vol, err := s.resolveVolumeOrServiceVolume(name)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if vol == nil {
-		s.error(w, http.StatusNotFound, "volume not found")
+		s.error(w, http.StatusNotFound, "volume or service not found")
 		return
 	}
 
@@ -1048,13 +1203,13 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vol, err := s.store.GetVolumeByName(name)
+	vol, err := s.resolveVolumeOrServiceVolume(name)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if vol == nil {
-		s.error(w, http.StatusNotFound, "volume not found")
+		s.error(w, http.StatusNotFound, "volume or service not found")
 		return
 	}
 
@@ -1076,26 +1231,79 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		Message:  fmt.Sprintf("Restoring volume %s from backup %s", vol.Name, backup.ID),
 	})
 
-	// Check if attached service is running and needs to be stopped
 	var serviceRunning bool
 	var service *api.Service
+	var isPostgres bool
+
 	if vol.AttachedServiceID != "" {
 		service, err = s.store.GetService(vol.AttachedServiceID)
 		if err != nil {
 			s.error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if service != nil && service.ActualState == "running" && service.RuntimeID != "" {
-			serviceRunning = true
-			// Stop service
-			if err := s.runtime.StopContainer(r.Context(), service.RuntimeID); err != nil {
-				s.error(w, http.StatusInternalServerError, "failed to stop service before restore: "+err.Error())
-				return
+		if service != nil {
+			if service.Kind == "postgres" {
+				isPostgres = true
+			} else if service.ActualState == "running" && service.RuntimeID != "" {
+				serviceRunning = true
+				// Stop service
+				if err := s.runtime.StopContainer(r.Context(), service.RuntimeID); err != nil {
+					s.error(w, http.StatusInternalServerError, "failed to stop service before restore: "+err.Error())
+					return
+				}
 			}
 		}
 	}
 
-	// Safety: move current host path to temp safety location
+	if isPostgres {
+		if service.RuntimeID == "" {
+			s.error(w, http.StatusBadRequest, "cannot restore: database container has not been initialized/deployed")
+			return
+		}
+		// Ensure database container is running so we can restore logically
+		dbInfo, err := s.runtime.InspectContainer(r.Context(), service.RuntimeID)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to inspect database container: "+err.Error())
+			return
+		}
+		if dbInfo.State != runtime.StateRunning {
+			if err := s.runtime.StartContainer(r.Context(), service.RuntimeID); err != nil {
+				s.error(w, http.StatusInternalServerError, "failed to start database container for logical restore: "+err.Error())
+				return
+			}
+			service.ActualState = "running"
+			s.store.UpsertService(service)
+		}
+
+		// Verify checksum of backup archive
+		calcSum, err := ComputeFileSha256(backup.BackupPath)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to calculate backup checksum: "+err.Error())
+			return
+		}
+		if calcSum != backup.Checksum {
+			s.error(w, http.StatusBadRequest, fmt.Sprintf("backup checksum mismatch: expected %s, got %s", backup.Checksum, calcSum))
+			return
+		}
+
+		// Perform logical restore
+		if err := s.performPostgresRestore(r.Context(), vol, service, backup); err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to perform logical database restore: "+err.Error())
+			return
+		}
+
+		s.store.CreateEvent(&api.Event{
+			ID:       uuid.New().String(),
+			VolumeID: &vol.ID,
+			BackupID: &backup.ID,
+			Type:     events.BackupRestored.String(),
+			Message:  fmt.Sprintf("Successfully restored volume %s from backup %s", vol.Name, backup.ID),
+		})
+
+		s.json(w, http.StatusOK, map[string]string{"status": "restored"})
+		return
+	}
+
 	tempPath := vol.HostPath + ".tmp_restore_bak"
 	if _, err := os.Stat(vol.HostPath); err == nil {
 		if err := os.Rename(vol.HostPath, tempPath); err != nil {
@@ -1160,6 +1368,99 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	})
 
 	s.json(w, http.StatusOK, map[string]string{"status": "restored"})
+}
+
+func (s *Server) performPostgresRestore(ctx context.Context, vol *api.Volume, service *api.Service, backup *api.Backup) error {
+	restoreDumpPath := filepath.Join(vol.HostPath, "restore_dump.sql")
+	os.Remove(restoreDumpPath)
+
+	if err := DecompressGzipToFile(backup.BackupPath, restoreDumpPath); err != nil {
+		return fmt.Errorf("failed to decompress backup: %w", err)
+	}
+	defer os.Remove(restoreDumpPath)
+
+	cfgPath := filepath.Join(s.config.DataDir, "services", service.Name, fmt.Sprintf("deploy_%s.json", service.CurrentDeployID))
+	cfgJSON, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("failed to read service configuration: %w", err)
+	}
+	var cfg api.ServiceConfig
+	if err := json.Unmarshal(cfgJSON, &cfg); err != nil {
+		return fmt.Errorf("failed to parse service configuration: %w", err)
+	}
+
+	dbInfo, err := s.runtime.InspectContainer(ctx, service.RuntimeID)
+	if err != nil {
+		return fmt.Errorf("failed to inspect database container: %w", err)
+	}
+	dbIP := dbInfo.IPAddress
+
+	user := cfg.Environment["POSTGRES_USER"]
+	if user == "" {
+		user = "postgres"
+	}
+	password := cfg.Environment["POSTGRES_PASSWORD"]
+	dbname := cfg.Environment["POSTGRES_DB"]
+	if dbname == "" {
+		dbname = user
+	}
+
+	taskName := fmt.Sprintf("cairn-%s-restore-task-%s", service.Name, backup.ID[:8])
+	taskCfg := &api.ServiceConfig{
+		Name:        cfg.Name,
+		Kind:        cfg.Kind,
+		Image:       cfg.Image,
+		Command:     []string{"sh", "-c", fmt.Sprintf("psql -h %s -U %s -d %s -f /backup_vol/restore_dump.sql", dbIP, user, dbname)},
+		Environment: map[string]string{
+			"PGPASSWORD": password,
+		},
+		Volumes: []api.VolumeConfig{
+			{
+				Name:      vol.Name,
+				MountPath: "/backup_vol",
+			},
+		},
+	}
+
+	taskID, err := s.runtime.CreateContainer(ctx, taskCfg, taskName)
+	if err != nil {
+		return fmt.Errorf("failed to create restore task container: %w", err)
+	}
+	defer s.runtime.RemoveContainer(context.Background(), taskID)
+
+	if err := s.runtime.StartContainer(ctx, taskID); err != nil {
+		return fmt.Errorf("failed to start restore task container: %w", err)
+	}
+
+	var exitCode int
+	var runErr error
+	for {
+		info, err := s.runtime.InspectContainer(ctx, taskID)
+		if err != nil {
+			runErr = err
+			break
+		}
+		if info.State == runtime.StateStopped || info.State == runtime.StateError {
+			if info.ExitCode != nil {
+				exitCode = *info.ExitCode
+			} else {
+				exitCode = -1
+			}
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("restore execution context failed: %w", runErr)
+	}
+
+	if exitCode != 0 {
+		logs := s.getContainerLogs(ctx, taskID)
+		return fmt.Errorf("restore task failed with exit code %d. Logs: %s", exitCode, logs)
+	}
+
+	return nil
 }
 
 func (s *Server) restoreRollback(hostPath, tempPath string) {
@@ -1301,7 +1602,7 @@ func (s *Server) handleRunOneOff(w http.ResponseWriter, r *http.Request) {
 		Kind:        cfg.Kind,
 		Image:       cfg.Image,
 		Command:     []string{"/bin/sh", "-c", req.Command},
-		Environment: cfg.Environment,
+		Environment: s.resolveEnvPlaceholders(r.Context(), cfg.Environment),
 		Volumes:     cfg.Volumes,
 	}
 
@@ -1540,4 +1841,39 @@ func (s *Server) handleCronJobHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.json(w, http.StatusOK, history)
+}
+
+func (s *Server) resolveEnvPlaceholders(ctx context.Context, env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	resolved := make(map[string]string)
+	// Fetch all services from database to know their names
+	services, err := s.store.ListServices()
+	if err != nil {
+		for k, v := range env {
+			resolved[k] = v
+		}
+		return resolved
+	}
+
+	// Sort services by name length in descending order to avoid substring mismatch (e.g. replace "mongo-db" before "db")
+	sort.Slice(services, func(i, j int) bool {
+		return len(services[i].Name) > len(services[j].Name)
+	})
+
+	for k, v := range env {
+		val := v
+		for _, svc := range services {
+			if svc.RuntimeID != "" && strings.Contains(val, svc.Name) {
+				// Inspect the container to get its current IP
+				info, err := s.runtime.InspectContainer(ctx, svc.RuntimeID)
+				if err == nil && info.IPAddress != "" {
+					val = strings.ReplaceAll(val, svc.Name, info.IPAddress)
+				}
+			}
+		}
+		resolved[k] = val
+	}
+	return resolved
 }

@@ -178,3 +178,72 @@ func ComputeFileSha256(filePath string) (string, error) {
 
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// CompressFileToGzip compresses a source file to a gzip destFile and returns SHA256 checksum and size of the compressed file.
+func CompressFileToGzip(srcFile, destFile string) (string, int64, error) {
+	sf, err := os.Open(srcFile)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sf.Close()
+
+	df, err := os.Create(destFile)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer df.Close()
+
+	hash := sha256.New()
+	mw := io.MultiWriter(df, hash)
+
+	gw := gzip.NewWriter(mw)
+	defer gw.Close()
+
+	if _, err := io.Copy(gw, sf); err != nil {
+		return "", 0, fmt.Errorf("failed to compress file: %w", err)
+	}
+
+	if err := gw.Close(); err != nil {
+		return "", 0, fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+
+	if err := df.Sync(); err != nil {
+		return "", 0, fmt.Errorf("failed to sync file: %w", err)
+	}
+
+	stat, err := df.Stat()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	checksum := hex.EncodeToString(hash.Sum(nil))
+	return checksum, stat.Size(), nil
+}
+
+// DecompressGzipToFile decompresses a gzip source file to a destFile.
+func DecompressGzipToFile(srcFile, destFile string) error {
+	sf, err := os.Open(srcFile)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sf.Close()
+
+	gr, err := gzip.NewReader(sf)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gr.Close()
+
+	df, err := os.OpenFile(destFile, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer df.Close()
+
+	if _, err := io.Copy(df, gr); err != nil {
+		return fmt.Errorf("failed to decompress file: %w", err)
+	}
+
+	return nil
+}
+
