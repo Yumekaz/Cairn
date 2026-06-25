@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -283,6 +284,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// Run flow
 	updatedSvc, err := s.runDeployWorkflowSync(r.Context(), &cfg, deploy, svc, previousRuntimeID)
 	if err != nil {
+		log.Printf("cairnd: runDeployWorkflowSync failed: %v", err)
 		s.error(w, http.StatusInternalServerError, "Deployment failed: "+err.Error())
 		return
 	}
@@ -293,6 +295,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runWorkflowSync(ctx context.Context, wType string, input interface{}) (*api.Workflow, error) {
 	workflowID, err := s.duraflow.StartWorkflow(wType, input)
 	if err != nil {
+		log.Printf("cairnd: StartWorkflow failed: %v", err)
 		return nil, err
 	}
 

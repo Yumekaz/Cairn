@@ -21,6 +21,10 @@ import (
 	"github.com/yumekaz/cairn/internal/duraflow"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
+	dfengine "github.com/yumekaz/duraflow/pkg/engine"
+	dfexecutor "github.com/yumekaz/duraflow/pkg/executor"
+	dfstore "github.com/yumekaz/duraflow/pkg/store"
+	dfworker "github.com/yumekaz/duraflow/pkg/worker"
 )
 
 // Server coordinates the SQLite store, RuntimeBackend, API routing, and Unix socket lifecycle.
@@ -31,6 +35,7 @@ type Server struct {
 	config    *config.DaemonConfig
 	startTime time.Time
 	duraflow  *duraflow.Engine
+	dfWorker  *dfworker.WorkerDaemon
 }
 
 // NewServer initializes the Daemon API Server.
@@ -45,6 +50,30 @@ func NewServer(cfg *config.DaemonConfig, s *store.Store, r runtime.RuntimeBacken
 
 	srv.duraflow = duraflow.NewEngine(s, r)
 	srv.RegisterDuraFlowTemplates(srv.duraflow)
+
+	// Initialize real DuraFlow SQLite database
+	dfDbPath := filepath.Join(cfg.DataDir, "duraflow.db")
+	dfStore := dfstore.NewSQLiteStore(dfDbPath)
+	if err := dfStore.Init(); err != nil {
+		log.Fatalf("cairnd: Failed to initialize DuraFlow SQLite store: %v", err)
+	}
+
+	// Register executors
+	dfExecReg := dfexecutor.NewRegistry()
+	dfExecReg.Register("host", dfexecutor.NewHostExecutor())
+	dfExecReg.Register("docker", dfexecutor.NewDockerExecutor())
+	dfExecReg.Register("mini-docker", dfexecutor.NewMiniDockerExecutor())
+	dfExecReg.Register("cairn", srv.duraflow)
+
+	// Initialize real engine
+	realDfEngine := dfengine.NewWorkflowEngine(dfStore, dfExecReg)
+	srv.duraflow.SetRealEngine(realDfEngine)
+
+	// Register event synchronization hook from DuraFlow to Cairn
+	realDfEngine.OnEvent = srv.syncDuraFlowEventToCairn
+
+	// Initialize real background worker
+	srv.dfWorker = dfworker.NewWorkerDaemon(dfStore, realDfEngine)
 
 	srv.setupMiddleware()
 	srv.setupRoutes()
@@ -87,8 +116,17 @@ func (s *Server) Start(ctx context.Context) error {
 	sched := NewScheduler(s.store, s.runtime, s.config.DataDir)
 	go sched.Start(ctx)
 
-	// Reconcile and resume active workflows
-	go s.duraflow.ReconcileActiveWorkflows()
+	// Start background DuraFlow worker daemon
+	if err := s.dfWorker.Start(); err != nil {
+		log.Printf("cairnd: Warning: failed to start background worker: %v", err)
+	}
+
+	// Graceful worker shutdown
+	go func() {
+		<-ctx.Done()
+		log.Println("cairnd: Stopping background worker daemon...")
+		s.dfWorker.Stop()
+	}()
 
 	// Start periodic service state and runtime reconciliation loop
 	go s.startReconciliationLoop(ctx)
@@ -344,5 +382,114 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+func (s *Server) syncDuraFlowEventToCairn(ev *dfstore.Event) {
+	switch ev.EventType {
+	case dfengine.EventWorkflowRunCreated:
+		w := &api.Workflow{
+			ID:               ev.RunID,
+			Type:             ev.WorkflowName,
+			Status:           "pending",
+			CurrentStepIndex: 0,
+			InputJSON:        s.duraflow.GetRunInput(ev.RunID),
+		}
+		_ = s.store.CreateWorkflow(w)
+
+	case dfengine.EventWorkflowStarted:
+		w, err := s.store.GetWorkflow(ev.RunID)
+		if err == nil && w != nil {
+			w.Status = "running"
+			_ = s.store.UpdateWorkflow(w)
+		}
+
+	case dfengine.EventWorkflowCompleted:
+		w, err := s.store.GetWorkflow(ev.RunID)
+		if err == nil && w != nil {
+			w.Status = "success"
+			_ = s.store.UpdateWorkflow(w)
+		}
+
+	case dfengine.EventWorkflowFailed:
+		w, err := s.store.GetWorkflow(ev.RunID)
+		if err == nil && w != nil {
+			w.Status = "failed"
+			_ = s.store.UpdateWorkflow(w)
+		}
+
+	case dfengine.EventStepScheduled:
+		// Find the index of the step in the template
+		tmpl, ok := s.duraflow.GetTemplate(ev.WorkflowName)
+		if ok {
+			stepIdx := 0
+			for idx, name := range tmpl.Steps {
+				if name == ev.StepID {
+					stepIdx = idx
+					break
+				}
+			}
+			step := &api.WorkflowStep{
+				ID:         fmt.Sprintf("%s-%s", ev.RunID, ev.StepID),
+				WorkflowID: ev.RunID,
+				StepIndex:  stepIdx,
+				Name:       ev.StepID,
+				Status:     "pending",
+			}
+			_ = s.store.CreateWorkflowStep(step)
+		}
+
+	case dfengine.EventStepStarted:
+		step := &api.WorkflowStep{
+			ID:         fmt.Sprintf("%s-%s", ev.RunID, ev.StepID),
+			WorkflowID: ev.RunID,
+			Name:       ev.StepID,
+			Status:     "running",
+		}
+		_ = s.store.UpdateWorkflowStep(step)
+
+	case dfengine.EventStepSucceeded:
+		step := &api.WorkflowStep{
+			ID:         fmt.Sprintf("%s-%s", ev.RunID, ev.StepID),
+			WorkflowID: ev.RunID,
+			Name:       ev.StepID,
+			Status:     "success",
+		}
+		_ = s.store.UpdateWorkflowStep(step)
+		// Update current step index on the workflow run in Cairn
+		tmpl, ok := s.duraflow.GetTemplate(ev.WorkflowName)
+		if ok {
+			stepIdx := 0
+			for idx, name := range tmpl.Steps {
+				if name == ev.StepID {
+					stepIdx = idx
+					break
+				}
+			}
+			w, err := s.store.GetWorkflow(ev.RunID)
+			if err == nil && w != nil {
+				w.CurrentStepIndex = stepIdx + 1
+				_ = s.store.UpdateWorkflow(w)
+			}
+		}
+
+	case dfengine.EventStepFailedFinal, dfengine.EventStepTimedOut:
+		// Extract error from payload if possible
+		var p struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal([]byte(ev.PayloadJSON), &p)
+		errMsg := p.Error
+		if errMsg == "" {
+			errMsg = "step failed"
+		}
+		step := &api.WorkflowStep{
+			ID:           fmt.Sprintf("%s-%s", ev.RunID, ev.StepID),
+			WorkflowID:   ev.RunID,
+			Name:         ev.StepID,
+			Status:       "failed",
+			ErrorMessage: errMsg,
+		}
+		_ = s.store.UpdateWorkflowStep(step)
 	}
 }
