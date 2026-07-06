@@ -394,3 +394,21 @@ func (s *Store) UpdateBackup(b *api.Backup) error {
 		b.Status, b.SizeBytes, b.Checksum, completedAt, b.FailureReason, b.ID)
 	return err
 }
+
+// ListActiveDeployIDs returns all deploy IDs that are not completed (status != success and status != failed).
+func (s *Store) ListActiveDeployIDs() ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM deploys WHERE status != 'success' AND status != 'failed'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}

@@ -353,7 +353,7 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 	if err == nil {
 		for _, rc := range runtimeContainers {
 			nameClean := strings.TrimPrefix(rc.Name, "/")
-			if strings.HasPrefix(nameClean, "cairn-") {
+			if strings.HasPrefix(nameClean, "cairn-") && !strings.Contains(nameClean, "-restore-task-") && !strings.Contains(nameClean, "-backup-task-") {
 				// Check if this container corresponds to a registered service's current running ID
 				isRegistered := false
 				for _, svc := range services {
@@ -363,18 +363,30 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 					}
 				}
 				if !isRegistered {
-					// Check active deployments in SQLite to verify it's not a currently creating deployment candidate
-					deploys, err := s.store.ListRunningWorkflows()
-					isActiveWorkflow := false
+					// Check active deployments in SQLite to verify it's not a currently creating deployment candidate or migration task
+					activeDeploys, err := s.store.ListActiveDeployIDs()
+					isActiveDeploy := false
 					if err == nil {
-						for _, w := range deploys {
-							if strings.Contains(nameClean, w.ID[:8]) {
-								isActiveWorkflow = true
+						for _, depID := range activeDeploys {
+							if strings.Contains(nameClean, depID[:8]) {
+								isActiveDeploy = true
 								break
 							}
 						}
 					}
-					if !isActiveWorkflow {
+					// Also fallback to check active workflows (like database backups/restores if not using deploys table)
+					if !isActiveDeploy {
+						deploys, err := s.store.ListRunningWorkflows()
+						if err == nil {
+							for _, w := range deploys {
+								if strings.Contains(nameClean, w.ID[:8]) {
+									isActiveDeploy = true
+									break
+								}
+							}
+						}
+					}
+					if !isActiveDeploy {
 						log.Printf("cairnd: Corrupted state: found dangling untracked container %s (%s). Reconciling cleanup...\n", rc.Name, rc.ID)
 						_ = s.runtime.StopContainer(ctx, rc.ID)
 						_ = s.runtime.RemoveContainer(ctx, rc.ID)

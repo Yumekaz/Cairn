@@ -418,6 +418,10 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 	svc := &input.Service
 	previousRuntimeID := input.PreviousRuntimeID
 
+	if dbDeploy, err := s.store.GetDeploy(deploy.ID); err == nil && dbDeploy != nil {
+		deploy.StateTouched = dbDeploy.StateTouched
+	}
+
 	if cfg.Kind == "cron" {
 		if previousRuntimeID != "" {
 			_ = s.runtime.StopContainer(ctx.Context, previousRuntimeID)

@@ -54,7 +54,7 @@ func (a *MiniDockerAdapter) CreateContainer(ctx context.Context, cfg *api.Servic
 	}
 
 	networkMode := "bridge"
-	if len(cfg.Ports) == 0 {
+	if cfg.Kind == "worker" || cfg.Kind == "cron" {
 		networkMode = "none"
 	}
 
