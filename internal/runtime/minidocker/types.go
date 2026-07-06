@@ -13,6 +13,7 @@ type CreateContainerRequest struct {
 type CreateHostConfig struct {
 	PortBindings map[string][]PortBinding `json:"PortBindings,omitempty"`
 	Binds        []string                 `json:"Binds,omitempty"`
+	NetworkMode  string                   `json:"NetworkMode,omitempty"`
 }
 
 // PortBinding maps a container port to a host port.

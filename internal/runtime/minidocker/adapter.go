@@ -53,6 +53,11 @@ func (a *MiniDockerAdapter) CreateContainer(ctx context.Context, cfg *api.Servic
 		envs = append(envs, fmt.Sprintf("%s=%s", k, v))
 	}
 
+	networkMode := "bridge"
+	if len(cfg.Ports) == 0 {
+		networkMode = "none"
+	}
+
 	req := CreateContainerRequest{
 		Image: cfg.Image,
 		Cmd:   cfg.Command,
@@ -61,6 +66,7 @@ func (a *MiniDockerAdapter) CreateContainer(ctx context.Context, cfg *api.Servic
 		HostConfig: CreateHostConfig{
 			PortBindings: portBindings,
 			Binds:        binds,
+			NetworkMode:  networkMode,
 		},
 	}
 
