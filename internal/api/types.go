@@ -172,3 +172,11 @@ type WorkflowStep struct {
 	CreatedAt    time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
 }
+
+// ServiceEnvVar represents a service environment variable or secret.
+type ServiceEnvVar struct {
+	ServiceID string `json:"service_id" db:"service_id"`
+	Key       string `json:"key" db:"key"`
+	Value     string `json:"value" db:"value"`
+	IsSecret  bool   `json:"is_secret" db:"is_secret"`
+}

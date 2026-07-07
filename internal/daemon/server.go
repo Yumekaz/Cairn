@@ -140,7 +140,7 @@ func (s *Server) Start(ctx context.Context) error {
 		if err == nil {
 			log.Printf("cairnd: Dashboard and API TCP server listening on http://%s", s.config.DashboardAddr)
 			httpServerTCP := &http.Server{
-				Handler: s.router,
+				Handler: s,
 			}
 			go func() {
 				if err := httpServerTCP.Serve(tcpListener); err != nil && err != http.ErrServerClosed {

@@ -239,7 +239,7 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 			Kind:        cfg.Kind,
 			Image:       cfg.Image,
 			Command:     []string{"/bin/sh", "-c", cfg.Migration},
-			Environment: s.resolveEnvPlaceholders(ctx.Context, cfg.Environment),
+			Environment: s.resolveEnvPlaceholders(ctx.Context, s.mergeDatabaseEnvs(svc.ID, cfg.Environment)),
 			Volumes:     cfg.Volumes,
 		}
 
@@ -321,7 +321,7 @@ func (s *Server) execDeployCreateContainer(ctx *duraflow.StepContext) error {
 	}
 
 	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
-	cfg.Environment = s.resolveEnvPlaceholders(ctx.Context, cfg.Environment)
+	cfg.Environment = s.resolveEnvPlaceholders(ctx.Context, s.mergeDatabaseEnvs(svc.ID, cfg.Environment))
 
 	candidateID, err := s.runtime.CreateContainer(ctx.Context, cfg, candidateName)
 	if err != nil {

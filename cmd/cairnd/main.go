@@ -30,6 +30,9 @@ func main() {
 		log.Fatalf("Failed to load daemon config: %v", err)
 	}
 
+	// Initialize secrets host key
+	config.InitHostKey(cfg.DataDir)
+
 	// 2. Setup logging
 	logFile := filepath.Join(cfg.DataDir, "cairnd.log")
 	logger, err := logging.SetupLogger(*logLevel, logFile)

@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/yumekaz/cairn/internal/api"
+	"github.com/yumekaz/cairn/internal/config"
 	"github.com/yumekaz/cairn/internal/daemon/dashboard"
 	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
@@ -40,6 +41,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/logs", s.handleServiceLogs)
 			r.Post("/rollback", s.handleRollbackService)
 			r.Post("/run", s.handleRunOneOff)
+			r.Route("/env", func(r chi.Router) {
+				r.Get("/", s.handleListEnvVars)
+				r.Post("/", s.handleSetEnvVar)
+				r.Delete("/{key}", s.handleDeleteEnvVar)
+			})
 		})
 	})
 
@@ -1631,4 +1637,183 @@ func (s *Server) handleGetServiceDeploys(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.json(w, http.StatusOK, deploys)
+}
+
+func (s *Server) mergeDatabaseEnvs(serviceID string, configEnvs map[string]string) map[string]string {
+	merged := make(map[string]string)
+	// Copy original config envs first
+	for k, v := range configEnvs {
+		merged[k] = v
+	}
+
+	// Fetch custom envs/secrets from DB
+	dbEnvs, err := s.store.ListServiceEnvs(serviceID)
+	if err == nil {
+		for _, dbEnv := range dbEnvs {
+			val := dbEnv.Value
+			if dbEnv.IsSecret {
+				decrypted, err := config.DecryptSecret(val)
+				if err == nil {
+					val = decrypted
+				} else {
+					log.Printf("cairnd: Warning: failed to decrypt secret %s: %v", dbEnv.Key, err)
+				}
+			}
+			merged[dbEnv.Key] = val
+		}
+	}
+	return merged
+}
+
+func (s *Server) handleListEnvVars(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	envs, err := s.store.ListServiceEnvs(svc.ID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Redact secret values
+	for _, env := range envs {
+		if env.IsSecret {
+			env.Value = "[REDACTED]"
+		}
+	}
+
+	s.json(w, http.StatusOK, envs)
+}
+
+func (s *Server) handleSetEnvVar(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	var req struct {
+		Key      string `json:"key"`
+		Value    string `json:"value"`
+		IsSecret bool   `json:"is_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Key == "" {
+		s.error(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	val := req.Value
+	if req.IsSecret {
+		encrypted, err := config.EncryptSecret(val)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to encrypt secret: "+err.Error())
+			return
+		}
+		val = encrypted
+	}
+
+	envVar := &api.ServiceEnvVar{
+		ServiceID: svc.ID,
+		Key:       req.Key,
+		Value:     val,
+		IsSecret:  req.IsSecret,
+	}
+
+	if err := s.store.UpsertServiceEnv(envVar); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Trigger synchronous redeployment to inject new variable
+	if err := s.triggerServiceRedeploy(r.Context(), svc); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to redeploy service: "+err.Error())
+		return
+	}
+
+	s.json(w, http.StatusOK, map[string]string{"status": "success"})
+}
+
+func (s *Server) handleDeleteEnvVar(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	key := chi.URLParam(r, "key")
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if svc == nil {
+		s.error(w, http.StatusNotFound, "service not found")
+		return
+	}
+
+	if err := s.store.DeleteServiceEnv(svc.ID, key); err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Trigger synchronous redeployment to remove key
+	if err := s.triggerServiceRedeploy(r.Context(), svc); err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to redeploy service: "+err.Error())
+		return
+	}
+
+	s.json(w, http.StatusOK, map[string]string{"status": "success"})
+}
+
+func (s *Server) triggerServiceRedeploy(ctx context.Context, svc *api.Service) error {
+	cfg, err := s.loadCurrentServiceConfig(svc)
+	if err != nil {
+		return fmt.Errorf("failed to load service config: %w", err)
+	}
+
+	deployID := uuid.New().String()
+	deploy := &api.Deploy{
+		ID:           deployID,
+		ServiceID:    svc.ID,
+		Version:      fmt.Sprintf("v_env_%d", time.Now().Unix()),
+		SourcePath:   "env_update",
+		Status:       "pending",
+		Stage:        "starting",
+		HealthStatus: "unhealthy",
+		CreatedAt:    time.Now(),
+	}
+
+	if err := s.store.CreateDeploy(deploy); err != nil {
+		return err
+	}
+
+	previousRuntimeID := svc.RuntimeID
+	svc.CurrentDeployID = deployID
+	if err := s.store.UpsertService(svc); err != nil {
+		return err
+	}
+
+	s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		DeployID:  &deployID,
+		Type:      events.DeployStarted.String(),
+		Message:   fmt.Sprintf("Redeploying service %s due to environment variable / secrets update", svc.Name),
+	})
+
+	_, err = s.runDeployWorkflowSync(ctx, cfg, deploy, svc, previousRuntimeID)
+	return err
 }

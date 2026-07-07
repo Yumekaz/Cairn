@@ -1319,5 +1319,176 @@ func TestReliabilityHardening(t *testing.T) {
 	})
 }
 
+func TestReverseProxyAndEnvs(t *testing.T) {
+	// 1. Check if socket exists
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/home/yumekaz"
+	}
+	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Skip("Cairn socket does not exist. Skipping proxy/envs integration test.")
+	}
+
+	client := cli.NewDaemonClient(socketPath)
+	ctx := context.Background()
+
+	// Load daemon config to get DashboardAddr
+	cfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		t.Fatalf("failed to load daemon config: %v", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working dir: %v", err)
+	}
+	projectRoot := wd
+	if strings.HasSuffix(projectRoot, "tests/integration") {
+		projectRoot = filepath.Dir(filepath.Dir(projectRoot))
+	}
+	cairnYamlPath := filepath.Join(projectRoot, "examples", "counter-api", "cairn.yaml")
+
+	// 2. Deploy valid service config
+	svcCfg, err := config.ParseServiceConfig(cairnYamlPath)
+	if err != nil {
+		t.Fatalf("failed to parse config: %v", err)
+	}
+
+	t.Log("Deploying service for proxy/envs testing...")
+	var svc api.Service
+	err = client.Post(ctx, "/services", svcCfg, &svc)
+	if err != nil {
+		t.Fatalf("failed to deploy: %v", err)
+	}
+	defer client.Delete(ctx, "/services/counter-api", nil)
+
+	// 3. Test HTTP reverse proxy to container using Host header on DashboardAddr
+	clientHttp := &http.Client{Timeout: 3 * time.Second}
+	reqUrl := fmt.Sprintf("http://%s/index.html", cfg.DashboardAddr)
+	req, err := http.NewRequest("GET", reqUrl, nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Host = "counter-api.localhost"
+
+	t.Logf("Verifying reverse proxy routing via Host header '%s' to '%s'...", req.Host, reqUrl)
+	resp, err := clientHttp.Do(req)
+	if err != nil {
+		t.Fatalf("failed to reach service through reverse proxy: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 via proxy, got %d. Body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// 4. Test environment variables (Set, List, Masking, Delete)
+	t.Log("Setting a custom environment variable...")
+	var setRes map[string]string
+	setReq := map[string]interface{}{
+		"key":       "TEST_CUSTOM_ENV",
+		"value":     "cairn-val-123",
+		"is_secret": false,
+	}
+	err = client.Post(ctx, "/services/counter-api/env", setReq, &setRes)
+	if err != nil {
+		t.Fatalf("failed to set env var: %v", err)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	t.Log("Setting a service secret...")
+	secretReq := map[string]interface{}{
+		"key":       "TEST_SECRET_ENV",
+		"value":     "my-super-secret-key",
+		"is_secret": true,
+	}
+	err = client.Post(ctx, "/services/counter-api/env", secretReq, &setRes)
+	if err != nil {
+		t.Fatalf("failed to set secret: %v", err)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	t.Log("Listing custom env vars and verifying masking...")
+	var envs []*api.ServiceEnvVar
+	err = client.Get(ctx, "/services/counter-api/env", &envs)
+	if err != nil {
+		t.Fatalf("failed to list env vars: %v", err)
+	}
+
+	foundEnv := false
+	foundSecret := false
+	for _, env := range envs {
+		if env.Key == "TEST_CUSTOM_ENV" {
+			foundEnv = true
+			if env.Value != "cairn-val-123" {
+				t.Errorf("expected TEST_CUSTOM_ENV value 'cairn-val-123', got '%s'", env.Value)
+			}
+		}
+		if env.Key == "TEST_SECRET_ENV" {
+			foundSecret = true
+			if env.Value != "[REDACTED]" {
+				t.Errorf("expected secret TEST_SECRET_ENV to be masked as '[REDACTED]', got '%s'", env.Value)
+			}
+		}
+	}
+
+	if !foundEnv {
+		t.Error("TEST_CUSTOM_ENV not found in listed env vars")
+	}
+	if !foundSecret {
+		t.Error("TEST_SECRET_ENV not found in listed env vars")
+	}
+
+	time.Sleep(1 * time.Second)
+
+	t.Log("Deleting custom environment variable...")
+	var delRes map[string]string
+	err = client.Delete(ctx, "/services/counter-api/env/TEST_CUSTOM_ENV", &delRes)
+	if err != nil {
+		t.Fatalf("failed to delete env var: %v", err)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	// Verify it was deleted
+	err = client.Get(ctx, "/services/counter-api/env", &envs)
+	if err == nil {
+		for _, env := range envs {
+			if env.Key == "TEST_CUSTOM_ENV" {
+				t.Error("TEST_CUSTOM_ENV should have been deleted")
+			}
+		}
+	}
+
+	time.Sleep(1 * time.Second)
+
+	// 5. Stop service and verify 503 Service Unavailable page
+	t.Log("Stopping service to verify 503 routing...")
+	var stopRes api.Service
+	err = client.Post(ctx, "/services/counter-api/stop", nil, &stopRes)
+	if err != nil {
+		t.Fatalf("failed to stop service: %v", err)
+	}
+
+	t.Log("Verifying 503 page response...")
+	resp, err = clientHttp.Do(req)
+	if err != nil {
+		t.Fatalf("failed to reach stopped service: %v", err)
+	}
+	bodyBytes, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503 Service Unavailable, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(bodyBytes), "Service Unavailable") {
+		t.Errorf("response body should contain 'Service Unavailable', got: %s", string(bodyBytes))
+	}
+}
+
 
 

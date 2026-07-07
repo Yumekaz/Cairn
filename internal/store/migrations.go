@@ -123,6 +123,15 @@ func (s *Store) Migrate() error {
 			updated_at DATETIME NOT NULL,
 			FOREIGN KEY(workflow_id) REFERENCES duraflow_workflows(id) ON DELETE CASCADE
 		);`,
+
+		`CREATE TABLE IF NOT EXISTS service_envs (
+			service_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			is_secret BOOLEAN NOT NULL DEFAULT 0,
+			PRIMARY KEY(service_id, key),
+			FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
+		);`,
 	}
 
 	for _, query := range queries {
