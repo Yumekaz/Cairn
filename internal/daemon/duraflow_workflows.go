@@ -553,19 +553,21 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 		Message:  fmt.Sprintf("Started backup for volume %s (ID: %s)", vol.Name, b.ID),
 	})
 
-	var isPostgresRunning bool
+	var isLogicalDbRunning bool
+	var dbType string // "postgres", "redis", "mongodb"
 	var dbService *api.Service
 	var dbServiceConfig *api.ServiceConfig
 
 	if vol.AttachedServiceID != "" {
 		svc, err := s.store.GetService(vol.AttachedServiceID)
-		if err == nil && svc != nil && svc.Kind == "postgres" && svc.ActualState == "running" && svc.RuntimeID != "" {
+		if err == nil && svc != nil && (svc.Kind == "postgres" || svc.Kind == "redis" || svc.Kind == "mongodb") && svc.ActualState == "running" && svc.RuntimeID != "" {
 			cfgPath := filepath.Join(s.config.DataDir, "services", svc.Name, fmt.Sprintf("deploy_%s.json", svc.CurrentDeployID))
 			cfgJSON, err := os.ReadFile(cfgPath)
 			if err == nil {
 				var cfg api.ServiceConfig
 				if err := json.Unmarshal(cfgJSON, &cfg); err == nil {
-					isPostgresRunning = true
+					isLogicalDbRunning = true
+					dbType = svc.Kind
 					dbService = svc
 					dbServiceConfig = &cfg
 				}
@@ -576,8 +578,15 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 	var checksum string
 	var sizeBytes int64
 
-	if isPostgresRunning {
-		checksum, sizeBytes, err = s.performPostgresDumpBackup(vol, dbService, dbServiceConfig, backupPath, b.ID)
+	if isLogicalDbRunning {
+		switch dbType {
+		case "postgres":
+			checksum, sizeBytes, err = s.performPostgresDumpBackup(vol, dbService, dbServiceConfig, backupPath, b.ID)
+		case "redis":
+			checksum, sizeBytes, err = s.performRedisDumpBackup(vol, dbService, dbServiceConfig, backupPath, b.ID)
+		case "mongodb":
+			checksum, sizeBytes, err = s.performMongoDumpBackup(vol, dbService, dbServiceConfig, backupPath, b.ID)
+		}
 	} else {
 		checksum, sizeBytes, err = CreateTarGz(vol.HostPath, backupPath)
 	}
@@ -648,13 +657,14 @@ func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 	})
 
 	var serviceRunning bool
-	var isPostgres bool
+	var dbType string // "postgres", "redis", "mongodb"
 
 	if vol.AttachedServiceID != "" {
 		service, err := s.store.GetService(vol.AttachedServiceID)
 		if err == nil && service != nil {
-			if service.Kind == "postgres" {
-				isPostgres = true
+			dbType = service.Kind
+			if dbType == "postgres" || dbType == "mongodb" {
+				// Keep database container running for logical restore commands
 			} else if service.ActualState == "running" && service.RuntimeID != "" {
 				serviceRunning = true
 				if err := s.runtime.StopContainer(ctx.Context, service.RuntimeID); err != nil {
@@ -664,7 +674,7 @@ func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 		}
 	}
 
-	ctx.State["is_postgres"] = fmt.Sprintf("%v", isPostgres)
+	ctx.State["db_type"] = dbType
 	ctx.State["service_running"] = fmt.Sprintf("%v", serviceRunning)
 	return nil
 }
@@ -685,7 +695,8 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 		return err
 	}
 
-	isPostgres := ctx.State["is_postgres"] == "true"
+	dbType := ctx.State["db_type"]
+	isLogicalRestore := dbType == "postgres" || dbType == "mongodb"
 	serviceRunning := ctx.State["service_running"] == "true"
 
 	var service *api.Service
@@ -693,7 +704,7 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 		service, _ = s.store.GetService(vol.AttachedServiceID)
 	}
 
-	if isPostgres {
+	if isLogicalRestore {
 		if service == nil || service.RuntimeID == "" {
 			return fmt.Errorf("database container has not been initialized")
 		}
@@ -719,8 +730,15 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 			return fmt.Errorf("checksum mismatch: expected %s, got %s", backup.Checksum, calcSum)
 		}
 
-		if err := s.performPostgresRestore(ctx.Context, vol, service, backup); err != nil {
-			return fmt.Errorf("logical database restore failed: %w", err)
+		var restoreErr error
+		if dbType == "postgres" {
+			restoreErr = s.performPostgresRestore(ctx.Context, vol, service, backup)
+		} else if dbType == "mongodb" {
+			restoreErr = s.performMongoRestore(ctx.Context, vol, service, backup)
+		}
+
+		if restoreErr != nil {
+			return fmt.Errorf("logical database restore failed: %w", restoreErr)
 		}
 
 		s.store.CreateEvent(&api.Event{
@@ -760,12 +778,23 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", backup.Checksum, calcSum)
 	}
 
-	if err := ExtractTarGz(backup.BackupPath, vol.HostPath); err != nil {
-		s.restoreRollback(vol.HostPath, tempPath)
-		if serviceRunning && service != nil {
-			_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
+	if dbType == "redis" {
+		_ = os.MkdirAll(vol.HostPath, 0755)
+		if err := DecompressGzipToFile(backup.BackupPath, filepath.Join(vol.HostPath, "dump.rdb")); err != nil {
+			s.restoreRollback(vol.HostPath, tempPath)
+			if serviceRunning && service != nil {
+				_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
+			}
+			return fmt.Errorf("failed to decompress Redis rdb: %w", err)
 		}
-		return fmt.Errorf("failed to extract tarball: %w", err)
+	} else {
+		if err := ExtractTarGz(backup.BackupPath, vol.HostPath); err != nil {
+			s.restoreRollback(vol.HostPath, tempPath)
+			if serviceRunning && service != nil {
+				_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
+			}
+			return fmt.Errorf("failed to extract tarball: %w", err)
+		}
 	}
 
 	if _, err := os.Stat(tempPath); err == nil {
@@ -790,10 +819,11 @@ func (s *Server) execRestoreStartContainer(ctx *duraflow.StepContext) error {
 		return err
 	}
 
-	isPostgres := ctx.State["is_postgres"] == "true"
+	dbType := ctx.State["db_type"]
+	isLogicalRestore := dbType == "postgres" || dbType == "mongodb"
 	serviceRunning := ctx.State["service_running"] == "true"
 
-	if isPostgres {
+	if isLogicalRestore {
 		return nil
 	}
 

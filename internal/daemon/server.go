@@ -273,7 +273,21 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 		return
 	}
 
+	activeDeploys, _ := s.store.ListActiveDeployIDs()
+
 	for _, svc := range services {
+		// Skip reconciliation if the service is currently being deployed
+		isActiveDeploy := false
+		for _, depID := range activeDeploys {
+			if svc.CurrentDeployID == depID {
+				isActiveDeploy = true
+				break
+			}
+		}
+		if isActiveDeploy {
+			continue
+		}
+
 		if svc.DesiredState == "running" {
 			runStateMatches := false
 			if svc.RuntimeID != "" {

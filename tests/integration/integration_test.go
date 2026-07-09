@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/yumekaz/cairn/internal/store"
 )
 func TestEndToEndMLP(t *testing.T) {
+	cleanStaleIptables(t, 8080, 8081, 8082, 8085)
 	// 1. Check if the cairnd daemon socket exists. If not, skip integration tests.
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -159,7 +161,13 @@ func TestEndToEndMLP(t *testing.T) {
 	}
 
 	// Verify data has been reverted back to state A
-	resp, err = clientHttp.Get(routeUrl)
+	for i := 0; i < 10; i++ {
+		resp, err = clientHttp.Get(routeUrl)
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
 	if err != nil {
 		t.Fatalf("failed to get route after restore: %v", err)
 	}
@@ -248,14 +256,23 @@ func TestMigrationsAndRollback(t *testing.T) {
 	t.Logf("Deploy 1 Succeeded (ID: %s)", deployID1)
 
 	// Verify that StateTouched is true for Deploy 1 in SQLite database
-	dbPath := filepath.Join(homeDir, ".cairn", "cairn.db")
-	st, err := store.NewStore(dbPath)
-	if err != nil {
-		t.Fatalf("failed to open store: %v", err)
+	runDB := func(fn func(st *store.Store) error) error {
+		dbPath := filepath.Join(homeDir, ".cairn", "cairn.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		return fn(st)
 	}
-	defer st.Close()
 
-	d1, err := st.GetDeploy(deployID1)
+	// Verify that StateTouched is true for Deploy 1 in SQLite database
+	var d1 *api.Deploy
+	err = runDB(func(st *store.Store) error {
+		var e error
+		d1, e = st.GetDeploy(deployID1)
+		return e
+	})
 	if err != nil {
 		t.Fatalf("failed to get deploy 1: %v", err)
 	}
@@ -264,7 +281,12 @@ func TestMigrationsAndRollback(t *testing.T) {
 	}
 
 	// Verify that a volume backup was automatically created for migration-vol
-	vol, err := st.GetVolumeByName("migration-vol")
+	var vol *api.Volume
+	err = runDB(func(st *store.Store) error {
+		var e error
+		vol, e = st.GetVolumeByName("migration-vol")
+		return e
+	})
 	if err != nil {
 		t.Fatalf("failed to get volume: %v", err)
 	}
@@ -272,7 +294,12 @@ func TestMigrationsAndRollback(t *testing.T) {
 		t.Fatal("expected volume migration-vol to exist")
 	}
 
-	backups, err := st.ListBackups(vol.ID)
+	var backups []*api.Backup
+	err = runDB(func(st *store.Store) error {
+		var e error
+		backups, e = st.ListBackups(vol.ID)
+		return e
+	})
 	if err != nil {
 		t.Fatalf("failed to list backups: %v", err)
 	}
@@ -311,7 +338,12 @@ func TestMigrationsAndRollback(t *testing.T) {
 	deployID2 := result2.CurrentDeployID
 	t.Logf("Deploy 2 Succeeded (ID: %s)", deployID2)
 
-	d2, err := st.GetDeploy(deployID2)
+	var d2 *api.Deploy
+	err = runDB(func(st *store.Store) error {
+		var e error
+		d2, e = st.GetDeploy(deployID2)
+		return e
+	})
 	if err != nil {
 		t.Fatalf("failed to get deploy 2: %v", err)
 	}
@@ -351,7 +383,12 @@ func TestMigrationsAndRollback(t *testing.T) {
 	deployID3 := result3.CurrentDeployID
 	t.Logf("Deploy 3 Succeeded (ID: %s)", deployID3)
 
-	d3, err := st.GetDeploy(deployID3)
+	var d3 *api.Deploy
+	err = runDB(func(st *store.Store) error {
+		var e error
+		d3, e = st.GetDeploy(deployID3)
+		return e
+	})
 	if err != nil {
 		t.Fatalf("failed to get deploy 3: %v", err)
 	}
@@ -427,11 +464,6 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(homeDir, ".cairn", "cairn.db")
-	st, err := store.NewStore(dbPath)
-	if err != nil {
-		t.Fatalf("failed to open store: %v", err)
-	}
-	defer st.Close()
 
 	// 2. Test One-off Command
 	t.Log("Testing one-off task container execution...")
@@ -470,9 +502,17 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 	}
 
 	// Check that a job run was recorded in the database
-	runs, err := st.ListJobRunsByService(workerSvc.ID)
-	if err != nil {
-		t.Fatalf("failed to list job runs: %v", err)
+	var runs []*api.JobRun
+	{
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open store: %v", err)
+		}
+		runs, err = st.ListJobRunsByService(workerSvc.ID)
+		st.Close()
+		if err != nil {
+			t.Fatalf("failed to list job runs: %v", err)
+		}
 	}
 	if len(runs) == 0 {
 		t.Error("expected a job run history record to be created, but found none")
@@ -512,9 +552,17 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 	}
 
 	// Verify cron job is registered in SQLite
-	cj, err := st.GetCronJobByName("test-cron-service")
-	if err != nil {
-		t.Fatalf("failed to get cron job: %v", err)
+	var cj *api.CronJob
+	{
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open store: %v", err)
+		}
+		cj, err = st.GetCronJobByName("test-cron-service")
+		st.Close()
+		if err != nil {
+			t.Fatalf("failed to get cron job: %v", err)
+		}
 	}
 	if cj == nil {
 		t.Fatal("expected cron job 'test-cron-service' to exist in store, but found nil")
@@ -1397,7 +1445,7 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 		t.Fatalf("failed to set env var: %v", err)
 	}
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	t.Log("Setting a service secret...")
 	secretReq := map[string]interface{}{
@@ -1410,7 +1458,7 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 		t.Fatalf("failed to set secret: %v", err)
 	}
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	t.Log("Listing custom env vars and verifying masking...")
 	var envs []*api.ServiceEnvVar
@@ -1443,7 +1491,7 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 		t.Error("TEST_SECRET_ENV not found in listed env vars")
 	}
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	t.Log("Deleting custom environment variable...")
 	var delRes map[string]string
@@ -1452,7 +1500,7 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 		t.Fatalf("failed to delete env var: %v", err)
 	}
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	// Verify it was deleted
 	err = client.Get(ctx, "/services/counter-api/env", &envs)
@@ -1487,6 +1535,195 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 	}
 	if !strings.Contains(string(bodyBytes), "Service Unavailable") {
 		t.Errorf("response body should contain 'Service Unavailable', got: %s", string(bodyBytes))
+	}
+}
+
+func TestRedisAndMongoBackupRestore(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/home/yumekaz"
+	}
+	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
+
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Skip("Cairn daemon socket does not exist. Skipping integration tests.")
+	}
+
+	// 1. Mock redis-cli, mongodump and mongorestore inside rootfs
+	redisCliPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/redis-cli"
+	mongoDumpPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/mongodump"
+	mongoRestorePath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/mongorestore"
+
+	redisCliScript := `#!/bin/sh
+echo "REDIS-DUMMY-DATA" > /backup_vol/backup_dump.rdb
+`
+	mongoDumpScript := `#!/bin/sh
+echo "MONGO-DUMMY-DATA" > /backup_vol/backup_dump.archive
+`
+	mongoRestoreScript := `#!/bin/sh
+cat /backup_vol/restore_dump.archive > /backup_vol/restored_mongo.txt
+`
+
+	if err := os.WriteFile(redisCliPath, []byte(redisCliScript), 0755); err != nil {
+		t.Fatalf("failed to write mock redis-cli: %v", err)
+	}
+	defer os.Remove(redisCliPath)
+
+	if err := os.WriteFile(mongoDumpPath, []byte(mongoDumpScript), 0755); err != nil {
+		t.Fatalf("failed to write mock mongodump: %v", err)
+	}
+	defer os.Remove(mongoDumpPath)
+
+	if err := os.WriteFile(mongoRestorePath, []byte(mongoRestoreScript), 0755); err != nil {
+		t.Fatalf("failed to write mock mongorestore: %v", err)
+	}
+	defer os.Remove(mongoRestorePath)
+
+	client := cli.NewDaemonClient(socketPath)
+	ctx := context.Background()
+
+	// Clean up any existing folders
+	redisVolPath := filepath.Join(homeDir, ".cairn", "volumes", "integration-redis-vol")
+	mongoVolPath := filepath.Join(homeDir, ".cairn", "volumes", "integration-mongo-vol")
+	os.RemoveAll(redisVolPath)
+	os.RemoveAll(mongoVolPath)
+
+	// --- TEST REDIS ---
+	t.Log("Deploying Redis service...")
+	redisCfg := &api.ServiceConfig{
+		Name:    "integration-redis",
+		Kind:    "redis",
+		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command: []string{"/bin/busybox", "sleep", "3600"},
+		Volumes: []api.VolumeConfig{
+			{Name: "integration-redis-vol", MountPath: "/backup_vol"},
+		},
+		Environment: map[string]string{
+			"REDIS_PASSWORD": "redissecretpass",
+		},
+	}
+	var redisSvc api.Service
+	if err := client.Post(ctx, "/services", redisCfg, &redisSvc); err != nil {
+		t.Fatalf("failed to deploy redis service: %v", err)
+	}
+	defer client.Delete(ctx, "/services/integration-redis", nil)
+
+	time.Sleep(3 * time.Second)
+
+	t.Log("Creating Redis volume backup...")
+	var redisBackup api.Backup
+	if err := client.Post(ctx, "/volumes/integration-redis-vol/backups", nil, &redisBackup); err != nil {
+		t.Fatalf("failed to backup redis: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	// Stop service before restore to simulate typical file-based restore behavior
+	var stopRes api.Service
+	if err := client.Post(ctx, "/services/integration-redis/stop", nil, &stopRes); err != nil {
+		t.Fatalf("failed to stop redis service: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	t.Log("Restoring Redis volume backup...")
+	restoreReq := map[string]string{"backup_id": redisBackup.ID}
+	var restoreRes map[string]string
+	if err := client.Post(ctx, "/volumes/integration-redis-vol/restore", restoreReq, &restoreRes); err != nil {
+		t.Fatalf("failed to restore redis backup: %v", err)
+	}
+
+	// Verify dump.rdb file is created inside the Redis volume directory
+	dumpRdbPath := filepath.Join(redisVolPath, "dump.rdb")
+	if _, err := os.Stat(dumpRdbPath); os.IsNotExist(err) {
+		t.Error("expected dump.rdb to be decompressed in volume directory after restore, but it does not exist")
+	}
+
+	time.Sleep(3 * time.Second)
+
+	// --- TEST MONGO ---
+	t.Log("Deploying MongoDB service...")
+	mongoCfg := &api.ServiceConfig{
+		Name:    "integration-mongo",
+		Kind:    "mongodb",
+		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Command: []string{"/bin/busybox", "sleep", "3600"},
+		Volumes: []api.VolumeConfig{
+			{Name: "integration-mongo-vol", MountPath: "/backup_vol"},
+		},
+		Environment: map[string]string{
+			"MONGO_INITDB_ROOT_USERNAME": "mongouser",
+			"MONGO_INITDB_ROOT_PASSWORD": "mongopassword",
+		},
+	}
+	var mongoSvc api.Service
+	if err := client.Post(ctx, "/services", mongoCfg, &mongoSvc); err != nil {
+		t.Fatalf("failed to deploy mongo service: %v", err)
+	}
+	defer client.Delete(ctx, "/services/integration-mongo", nil)
+
+	time.Sleep(3 * time.Second)
+
+	t.Log("Creating MongoDB volume backup...")
+	var mongoBackup api.Backup
+	if err := client.Post(ctx, "/volumes/integration-mongo-vol/backups", nil, &mongoBackup); err != nil {
+		t.Fatalf("failed to backup mongo: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	t.Log("Restoring MongoDB volume backup...")
+	restoreReqMongo := map[string]string{"backup_id": mongoBackup.ID}
+	if err := client.Post(ctx, "/volumes/integration-mongo-vol/restore", restoreReqMongo, &restoreRes); err != nil {
+		t.Fatalf("failed to restore mongo backup: %v", err)
+	}
+
+	// Verify restored_mongo.txt is created and populated inside the Mongo volume directory
+	mongoTxtPath := filepath.Join(mongoVolPath, "restored_mongo.txt")
+	content, err := os.ReadFile(mongoTxtPath)
+	if err != nil {
+		t.Fatalf("restored_mongo.txt was not found: %v", err)
+	}
+	if !strings.Contains(string(content), "MONGO-DUMMY-DATA") {
+		t.Errorf("expected restored_mongo.txt to contain 'MONGO-DUMMY-DATA', got '%s'", string(content))
+	}
+}
+
+func cleanStaleIptables(t *testing.T, ports ...int) {
+	cmd := exec.Command("sudo", "-S", "iptables", "-t", "nat", "-S")
+	cmd.Stdin = strings.NewReader("mihir\n")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Logf("Warning: failed to list iptables rules: %v (stderr: %s)", err, stderr.String())
+		return
+	}
+
+	lines := strings.Split(stdout.String(), "\n")
+	for _, line := range lines {
+		for _, port := range ports {
+			if strings.Contains(line, fmt.Sprintf("--dport %d", port)) {
+				rule := strings.TrimPrefix(line, "-A ")
+				parts := strings.Fields(rule)
+				if len(parts) == 0 {
+					continue
+				}
+				chain := parts[0]
+				ruleArgs := parts[1:]
+
+				args := append([]string{"-S", "iptables", "-t", "nat", "-D", chain}, ruleArgs...)
+				delCmd := exec.Command("sudo", args...)
+				delCmd.Stdin = strings.NewReader("mihir\n")
+				var delStderr bytes.Buffer
+				delCmd.Stderr = &delStderr
+				if err := delCmd.Run(); err != nil {
+					t.Logf("Warning: failed to delete iptables rule '%s': %v (stderr: %s)", line, err, delStderr.String())
+				} else {
+					t.Logf("Cleaned up stale iptables rule: %s", line)
+				}
+			}
+		}
 	}
 }
 

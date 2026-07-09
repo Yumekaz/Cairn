@@ -618,6 +618,173 @@ func (s *Server) performPostgresDumpBackup(vol *api.Volume, dbService *api.Servi
 	return checksum, sizeBytes, nil
 }
 
+func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service, dbServiceConfig *api.ServiceConfig, backupPath string, backupID string) (string, int64, error) {
+	dbInfo, err := s.runtime.InspectContainer(context.Background(), dbService.RuntimeID)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to inspect database container: %w", err)
+	}
+	dbIP := dbInfo.IPAddress
+
+	password := dbServiceConfig.Environment["REDIS_PASSWORD"]
+	dumpFileHostPath := filepath.Join(vol.HostPath, "backup_dump.rdb")
+	os.Remove(dumpFileHostPath)
+
+	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
+	cmd := fmt.Sprintf("redis-cli -h %s --rdb /backup_vol/backup_dump.rdb", dbIP)
+
+	taskCfg := &api.ServiceConfig{
+		Name:        dbServiceConfig.Name,
+		Kind:        dbServiceConfig.Kind,
+		Image:       dbServiceConfig.Image,
+		Command:     []string{"sh", "-c", cmd},
+		Environment: map[string]string{
+			"REDISCLI_AUTH": password,
+		},
+		Volumes: []api.VolumeConfig{
+			{
+				Name:      vol.Name,
+				MountPath: "/backup_vol",
+			},
+		},
+	}
+
+	taskID, err := s.runtime.CreateContainer(context.Background(), taskCfg, taskName)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create backup task container: %w", err)
+	}
+	defer s.runtime.RemoveContainer(context.Background(), taskID)
+
+	if err := s.runtime.StartContainer(context.Background(), taskID); err != nil {
+		return "", 0, fmt.Errorf("failed to start backup task container: %w", err)
+	}
+
+	var exitCode int
+	var runErr error
+	for {
+		info, err := s.runtime.InspectContainer(context.Background(), taskID)
+		if err != nil {
+			runErr = err
+			break
+		}
+		if info.State == runtime.StateStopped || info.State == runtime.StateError {
+			if info.ExitCode != nil {
+				exitCode = *info.ExitCode
+			} else {
+				exitCode = -1
+			}
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if runErr != nil {
+		return "", 0, fmt.Errorf("backup execution context failed: %w", runErr)
+	}
+
+	if exitCode != 0 {
+		logs := s.getContainerLogs(context.Background(), taskID)
+		return "", 0, fmt.Errorf("backup task failed with exit code %d. Logs: %s", exitCode, logs)
+	}
+
+	if _, err := os.Stat(dumpFileHostPath); err != nil {
+		return "", 0, fmt.Errorf("logical backup file was not created: %w", err)
+	}
+
+	checksum, sizeBytes, err := CompressFileToGzip(dumpFileHostPath, backupPath)
+	os.Remove(dumpFileHostPath)
+
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to compress logical backup dump: %w", err)
+	}
+
+	return checksum, sizeBytes, nil
+}
+
+func (s *Server) performMongoDumpBackup(vol *api.Volume, dbService *api.Service, dbServiceConfig *api.ServiceConfig, backupPath string, backupID string) (string, int64, error) {
+	dbInfo, err := s.runtime.InspectContainer(context.Background(), dbService.RuntimeID)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to inspect database container: %w", err)
+	}
+	dbIP := dbInfo.IPAddress
+
+	user := dbServiceConfig.Environment["MONGO_INITDB_ROOT_USERNAME"]
+	password := dbServiceConfig.Environment["MONGO_INITDB_ROOT_PASSWORD"]
+	dumpFileHostPath := filepath.Join(vol.HostPath, "backup_dump.archive")
+	os.Remove(dumpFileHostPath)
+
+	authArgs := ""
+	if user != "" && password != "" {
+		authArgs = fmt.Sprintf("--username %s --password %s --authenticationDatabase admin", user, password)
+	}
+
+	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
+	cmd := fmt.Sprintf("mongodump --host %s %s --archive=/backup_vol/backup_dump.archive", dbIP, authArgs)
+
+	taskCfg := &api.ServiceConfig{
+		Name:        dbServiceConfig.Name,
+		Kind:        dbServiceConfig.Kind,
+		Image:       dbServiceConfig.Image,
+		Command:     []string{"sh", "-c", cmd},
+		Volumes: []api.VolumeConfig{
+			{
+				Name:      vol.Name,
+				MountPath: "/backup_vol",
+			},
+		},
+	}
+
+	taskID, err := s.runtime.CreateContainer(context.Background(), taskCfg, taskName)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create backup task container: %w", err)
+	}
+	defer s.runtime.RemoveContainer(context.Background(), taskID)
+
+	if err := s.runtime.StartContainer(context.Background(), taskID); err != nil {
+		return "", 0, fmt.Errorf("failed to start backup task container: %w", err)
+	}
+
+	var exitCode int
+	var runErr error
+	for {
+		info, err := s.runtime.InspectContainer(context.Background(), taskID)
+		if err != nil {
+			runErr = err
+			break
+		}
+		if info.State == runtime.StateStopped || info.State == runtime.StateError {
+			if info.ExitCode != nil {
+				exitCode = *info.ExitCode
+			} else {
+				exitCode = -1
+			}
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if runErr != nil {
+		return "", 0, fmt.Errorf("backup execution context failed: %w", runErr)
+	}
+
+	if exitCode != 0 {
+		logs := s.getContainerLogs(context.Background(), taskID)
+		return "", 0, fmt.Errorf("backup task failed with exit code %d. Logs: %s", exitCode, logs)
+	}
+
+	if _, err := os.Stat(dumpFileHostPath); err != nil {
+		return "", 0, fmt.Errorf("logical backup file was not created: %w", err)
+	}
+
+	checksum, sizeBytes, err := CompressFileToGzip(dumpFileHostPath, backupPath)
+	os.Remove(dumpFileHostPath)
+
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to compress logical backup dump: %w", err)
+	}
+
+	return checksum, sizeBytes, nil
+}
+
 func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
@@ -1154,6 +1321,96 @@ func (s *Server) performPostgresRestore(ctx context.Context, vol *api.Volume, se
 		Environment: map[string]string{
 			"PGPASSWORD": password,
 		},
+		Volumes: []api.VolumeConfig{
+			{
+				Name:      vol.Name,
+				MountPath: "/backup_vol",
+			},
+		},
+	}
+
+	taskID, err := s.runtime.CreateContainer(ctx, taskCfg, taskName)
+	if err != nil {
+		return fmt.Errorf("failed to create restore task container: %w", err)
+	}
+	defer s.runtime.RemoveContainer(context.Background(), taskID)
+
+	if err := s.runtime.StartContainer(ctx, taskID); err != nil {
+		return fmt.Errorf("failed to start restore task container: %w", err)
+	}
+
+	var exitCode int
+	var runErr error
+	for {
+		info, err := s.runtime.InspectContainer(ctx, taskID)
+		if err != nil {
+			runErr = err
+			break
+		}
+		if info.State == runtime.StateStopped || info.State == runtime.StateError {
+			if info.ExitCode != nil {
+				exitCode = *info.ExitCode
+			} else {
+				exitCode = -1
+			}
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("restore execution context failed: %w", runErr)
+	}
+
+	if exitCode != 0 {
+		logs := s.getContainerLogs(ctx, taskID)
+		return fmt.Errorf("restore task failed with exit code %d. Logs: %s", exitCode, logs)
+	}
+
+	return nil
+}
+
+func (s *Server) performMongoRestore(ctx context.Context, vol *api.Volume, service *api.Service, backup *api.Backup) error {
+	restoreDumpPath := filepath.Join(vol.HostPath, "restore_dump.archive")
+	os.Remove(restoreDumpPath)
+
+	if err := DecompressGzipToFile(backup.BackupPath, restoreDumpPath); err != nil {
+		return fmt.Errorf("failed to decompress backup: %w", err)
+	}
+	defer os.Remove(restoreDumpPath)
+
+	cfgPath := filepath.Join(s.config.DataDir, "services", service.Name, fmt.Sprintf("deploy_%s.json", service.CurrentDeployID))
+	cfgJSON, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("failed to read service configuration: %w", err)
+	}
+	var cfg api.ServiceConfig
+	if err := json.Unmarshal(cfgJSON, &cfg); err != nil {
+		return fmt.Errorf("failed to parse service configuration: %w", err)
+	}
+
+	dbInfo, err := s.runtime.InspectContainer(ctx, service.RuntimeID)
+	if err != nil {
+		return fmt.Errorf("failed to inspect database container: %w", err)
+	}
+	dbIP := dbInfo.IPAddress
+
+	user := cfg.Environment["MONGO_INITDB_ROOT_USERNAME"]
+	password := cfg.Environment["MONGO_INITDB_ROOT_PASSWORD"]
+
+	authArgs := ""
+	if user != "" && password != "" {
+		authArgs = fmt.Sprintf("--username %s --password %s --authenticationDatabase admin", user, password)
+	}
+
+	taskName := fmt.Sprintf("cairn-%s-restore-task-%s", service.Name, backup.ID[:8])
+	cmd := fmt.Sprintf("mongorestore --host %s %s --drop --archive=/backup_vol/restore_dump.archive", dbIP, authArgs)
+
+	taskCfg := &api.ServiceConfig{
+		Name:        cfg.Name,
+		Kind:        cfg.Kind,
+		Image:       cfg.Image,
+		Command:     []string{"sh", "-c", cmd},
 		Volumes: []api.VolumeConfig{
 			{
 				Name:      vol.Name,

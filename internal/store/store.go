@@ -21,16 +21,18 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	connStr := dbPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 
 	// Optimize SQLite performance and enforce foreign keys
 	pragmaQuery := `
 	PRAGMA journal_mode=WAL;
 	PRAGMA foreign_keys=ON;
-	PRAGMA busy_timeout=5000;
+	PRAGMA busy_timeout=30000;
 	`
 	if _, err := db.Exec(pragmaQuery); err != nil {
 		db.Close()
