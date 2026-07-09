@@ -2,13 +2,13 @@
 
 ## Reporting a Vulnerability
 
-We take the security of Cairn seriously. If you find a security vulnerability, please do not report it in a public GitHub issue. Instead, report it responsibly by contacting the maintainers:
+We take the security of Cairn seriously. If you discover a security vulnerability, please do not disclose it in a public issue or comment.
 
-- **Email**: security@yumekaz.com (or open a draft security advisory on GitHub if applicable)
+Instead, please report the vulnerability responsibly by opening a draft **Security Advisory** directly through the repository's GitHub interface under the **Security** tab. 
 
-Please include as much detail as possible, including:
-- A clear description of the vulnerability.
-- Steps to reproduce the issue.
+Please provide as much information as possible, including:
+- A description of the vulnerability.
+- Steps to reproduce the issue (along with mock configurations/payloads if applicable).
 - Potential impact.
 
-We will acknowledge receipt of your report within 48 hours and work with you to coordinate a disclosure timeline.
+We will review the report and coordinate with you to address the vulnerability and release a patch responsibly.

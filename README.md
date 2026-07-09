@@ -1,100 +1,127 @@
-# 🏔️ Cairn PaaS
+# 🏔️ Cairn
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 
-**Cairn** is a CLI-first, single-node Platform-as-a-Service (PaaS) designed to run stateful backends, databases, and cron jobs with absolute operational honesty. Built directly on top of the **Mini-Docker** container runtime using a decoupled adapter interface, Cairn offers automated rollouts, hardware-encrypted secrets, logical database backups, and a resilient workflow orchestration engine.
+Cairn is a CLI-first, single-node Platform-as-a-Service (PaaS) built for orchestrating containerized backends, database engines, and scheduled tasks on Linux. Designed as a self-hosted alternative to modern cloud platforms, Cairn features zero-downtime rollouts, hardware-secured secrets, automated database persistence operations, and a resilient workflow execution engine.
+
+Cairn sits cleanly above container runtimes (such as **Mini-Docker**) through an adapter abstraction layer, managing system states, routing topologies, and data lifecycles.
 
 ---
 
-## ✨ Features
+## 🏗️ Architecture & Request Flow
 
-- 🌐 **Virtual-Host HTTP Reverse Proxy Router (Phase 4)**: Maps custom domains and virtual hosts (e.g., `*.localhost`) directly to isolated container IPs. Features automatic 503 "Service Unavailable" fallback pages when containers are unhealthy.
-- 🔒 **Secure Environment & Secrets Manager (Phase 7)**: Encrypts application secrets on the host using hardware-tied **AES-GCM** encryption. Automatically injects decrypted secrets during rollout workflows.
-- 🗄️ **First-Class Database Service Drivers (Phase 12)**: Out-of-the-box support for PostgreSQL (`pg_dump`), Redis (`rdb`), and MongoDB (`mongodump`/`mongorestore`). Executes atomic logical backup/restores rather than generic volume tarballs.
-- 🔄 **Durable Rollout Workflows (Phase 13-14)**: Built on the **DuraFlow** workflow engine. Executes multi-step ACID deployments (prepare, migrate, build, health check, route traffic) with automatic zero-downtime rollback if health checks fail.
-- ⏱️ **Cron Jobs & Background Workers (Phase 9)**: Native daemon-scheduled cron jobs and headless worker services with automatic history tracking in SQLite.
-- 📊 **Visual Web Dashboard (Phase 15)**: A built-in web dashboard (listening by default on port `2476`) offering real-time monitoring of deployments, container status, persistent volumes, logs, and system events.
-- 🧪 **FailForge Resiliency Testing (Phase 11)**: Integrated verification module simulating system failures, container crashes, and disk corruption to prove system reliability.
-- 🚀 **Automated Unix Installer (Phase 16)**: Single-command compilation, path configuration, and user-space deployment.
+The following diagram illustrates how incoming client requests map to isolated container instances via Cairn's integrated virtual-host reverse proxy:
+
+```mermaid
+graph TD
+    Client[Client Request] -->|Host: app.localhost| Proxy[Cairn Reverse Proxy Router]
+    Proxy -->|1. Lookup metadata| SQLite[(SQLite State Store)]
+    Proxy -->|2. Get container info| Runtime[Runtime Backend Adapter]
+    Runtime -->|3. Query state| Socket(Mini-Docker Socket)
+    Proxy -->|4. Forward traffic| Container[Isolated Container: 10.0.0.x:port]
+    
+    style Proxy fill:#4F46E5,stroke:#312E81,stroke-width:2px,color:#fff
+    style SQLite fill:#059669,stroke:#064E3B,stroke-width:2px,color:#fff
+    style Container fill:#06B6D4,stroke:#0891B2,stroke-width:2px,color:#fff
+```
 
 ---
 
-## 🛠️ System Requirements
+## 🔄 Deployment Lifecycle (DuraFlow Workflow)
 
-- **Operating System**: Linux (Ubuntu/Debian recommended)
-- **Kernel Modules**: `overlay` (OverlayFS active)
-- **Tooling**: Go `v1.22+` (to compile binaries), Python `v3.10+` (to run the Mini-Docker runtime)
+Every service deployment or modification is executed as a multi-step workflow. If the candidate service fails health checks, Cairn automatically rolls back to the previous healthy deployment:
+
+```mermaid
+graph TD
+    Start[Deploy Request] --> Validate[1. Validate Config]
+    Validate --> Build[2. Save Config & Prepare Dir]
+    Build --> Migrate{3. Database Migration?}
+    Migrate -->|Yes| RunMigration[Execute Migration Script]
+    Migrate -->|No| Create[4. Create Candidate Container]
+    RunMigration --> Create
+    Create --> StartCandidate[5. Start Candidate Container]
+    StartCandidate --> HealthCheck{6. Health Check Passes?}
+    
+    HealthCheck -->|Yes| RouteTraffic[7. Update Proxy Routing]
+    RouteTraffic --> Cleanup[8. Terminate & Remove Old Container]
+    Cleanup --> Done[Deploy Completed]
+    
+    HealthCheck -->|No| KeepRoute[7. Preserve Active Route to v1]
+    KeepRoute --> Rollback[8. Terminate Candidate & Rollback]
+    Rollback --> Failed[Deploy Failed]
+
+    style RouteTraffic fill:#059669,stroke:#064E3B,stroke-width:2px,color:#fff
+    style Rollback fill:#DC2626,stroke:#7F1D1D,stroke-width:2px,color:#fff
+```
+
+---
+
+## 🛠️ Key Capabilities
+
+* **Virtual-Host Reverse Proxy**: Built-in HTTP multiplexer mapping subdomains (e.g., `*.localhost`) to container bridge IPs. Automatically serves an operational custom fallback page if a service goes down.
+* **Hardware-Secured Secrets**: Encrypts sensitive environment variables on the host filesystem using **AES-GCM** encryption keyed against local system keys. 
+* **Stateful Database Drivers**: Native logical backup and restore flows for PostgreSQL, Redis, and MongoDB, replacing generic volume tarballs with true database snapshots.
+* **Transactional Deployment Workflows**: Core state mutations run on the durable **DuraFlow** workflow engine, preventing corrupted configurations and orchestrating zero-downtime rollbacks.
+* **Task Scheduling**: Integrated daemon-managed cron scheduler and headless background workers.
+* **Web Monitoring Console**: Low-footprint web interface displaying real-time metrics, system events, service status, and deployment history logs.
 
 ---
 
 ## 🚀 Quickstart Installation
 
-You can compile and deploy the Cairn PaaS control plane using the automated installer script:
+Ensure Go `v1.22+`, Python `v3.10+`, and `OverlayFS` are configured on your host system.
 
+### 1. Run the Installer
+Compile and configure Cairn using the automated script:
 ```bash
-# 1. Clone the repository
-git clone https://github.com/Yumekaz/Cairn.git && cd Cairn
-
-# 2. Run the installer script
 ./scripts/install.sh
 ```
+*This compiles the `cairn` CLI and `cairnd` daemon, initializes configurations in `~/.cairn/`, and moves binaries to `$HOME/.local/bin/`.*
 
-The installer will compile the `cairn` CLI client and `cairnd` control plane daemon, initialize configuration paths under `~/.cairn/`, and place the binaries in `$HOME/.local/bin`.
+### 2. Start the Runtime Daemon
+Run the Mini-Docker runtime daemon in the background:
+```bash
+sudo python3 -m mini_docker daemon --socket-mode 666
+```
 
-### Running the Services
-
-1. **Start the Mini-Docker Daemon** (required to manage container namespaces):
-   ```bash
-   sudo python3 -m mini_docker daemon --socket-mode 666
-   ```
-
-2. **Initialize the Cairn SQLite Metadata Store**:
-   ```bash
-   cairn init
-   ```
-
-3. **Start the Cairn Control Plane Daemon**:
-   ```bash
-   cairnd
-   ```
-   *The daemon starts the background DuraFlow workers, the cron scheduler, and the Web Dashboard/API server on `http://127.0.0.1:2476`.*
+### 3. Initialize & Launch Cairn
+Initialize Cairn's database structure and start the daemon:
+```bash
+cairn init
+cairnd
+```
 
 ---
 
-## 📖 Configuration Reference (`cairn.yaml`)
+## 📖 Declarative Specification (`cairn.yaml`)
 
-Cairn services are configured using a declarative `cairn.yaml` specification. Below is a complete PostgreSQL database service example with migrations and health checks:
+Services are defined using a structured configuration file:
 
 ```yaml
-name: core-db
-kind: postgres
+name: web-api
+kind: web
 
 runtime:
   backend: minidocker
-  image_or_rootfs: "postgres:15-alpine"
-  command: ["docker-entrypoint.sh", "postgres"]
+  image_or_rootfs: "python:3.10-alpine"
+  command: ["python", "app.py"]
 
 environment:
-  POSTGRES_USER: "cairn_user"
-  POSTGRES_DB: "cairn_prod"
+  API_PORT: "8000"
 
 volumes:
-  - name: db-data
-    mount: /var/lib/postgresql/data
-
-migrations:
-  command: ["sh", "-c", "psql -h $DB_HOST -U $POSTGRES_USER -d $POSTGRES_DB -f /var/lib/postgresql/data/migrations.sql"]
-  timeout: 30s
+  - name: storage-volume
+    mount: /app/data
 
 healthcheck:
   type: http
-  path: /health
+  path: /healthz
   interval: 5s
   timeout: 2s
   retries: 3
-  startup_grace: 15s
+  startup_grace: 10s
 
 restart:
   policy: always
@@ -102,96 +129,47 @@ restart:
 
 ---
 
-## 💻 CLI Commands
+## 💻 CLI Reference
 
-### Service Management
+### Deployments & Process Control
 ```bash
-# Deploy a service config
-cairn deploy ./examples/counter-api/cairn.yaml
+# Deploy a service configuration
+cairn deploy ./path/to/cairn.yaml
 
-# List running containers
+# View active workloads
 cairn ps
 
-# Stop or restart a service
-cairn stop counter-api
-cairn restart counter-api
-
-# Stream service logs
-cairn logs counter-api --follow
+# Control service state
+cairn stop <service-name>
+cairn restart <service-name>
 ```
 
-### Environment Variables & Secrets
+### Secrets & Variables
 ```bash
-# Set a standard environment variable
-cairn env set counter-api KEY_NAME value
+# Set a configuration environment variable
+cairn env set <service-name> KEY value
 
-# Set a hardware-encrypted secret variable
-cairn secret set counter-api SECRET_KEY confidential_value
+# Set a hardware-encrypted configuration secret
+cairn secret set <service-name> API_KEY value
 
-# List service environment keys (secrets are automatically masked)
-cairn env list counter-api
+# List configuration keys (values for secrets are masked)
+cairn env list <service-name>
 ```
 
-### Backups & Restores
+### Volumes & Backups
 ```bash
-# Create a volume backup (Logical for DBs, Tarball for files)
-cairn backup create counter-data
+# Create a volume snapshot
+cairn backup create <volume-name>
 
-# List volume backup snapshots
-cairn backup list counter-data
+# List backup snapshots
+cairn backup list <volume-name>
 
-# Restore a volume from snapshot
-cairn restore counter-data <backup_id>
-```
-
-### System Audits
-```bash
-# Stream the global system event log
-cairn events
-```
-
----
-
-## 📐 Architecture Overview
-
-```text
-       Developer / CLI
-              │
-              ▼
-    ┌───────────────────┐
-    │  Cairn Daemon     │  ◄───►  [SQLite Metadata Store]
-    │  (Port 2476)      │
-    └─────────┬─────────┘
-              │  routes workflows via
-              ▼
-    ┌───────────────────┐
-    │  DuraFlow Engine  │  ◄───►  [duraflow.db]
-    └─────────┬─────────┘
-              │  schedules execution
-              ▼
-    ┌───────────────────┐
-    │ Runtime Interface │
-    └─────────┬─────────┘
-              │  maps container namespaces
-              ▼
-    ┌───────────────────┐
-    │ Mini-Docker Sock  │
-    └─────────┬─────────┘
-              │  spins up sandboxed processes
-              ▼
-    ┌───────────────────┐
-    │ Linux Workloads   │
-    └───────────────────┘
+# Revert a volume state to a specific snapshot
+cairn restore <volume-name> <backup-id>
 ```
 
 ---
 
 ## 📄 License
 
-Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
-
----
-
-## 🔒 Security
-
-For security vulnerability reporting, please see [SECURITY.md](SECURITY.md).
+Distributed under the MIT License. See [LICENSE](LICENSE) for more details.
