@@ -72,6 +72,9 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/events", s.handleListEvents)
 
 	s.router.Handle("/dashboard/*", http.StripPrefix("/dashboard", dashboard.Handler()))
+	s.router.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	s.router.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 	})

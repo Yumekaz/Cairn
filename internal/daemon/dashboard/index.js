@@ -113,10 +113,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // OVERVIEW PANELS
   async function loadOverviewData() {
     try {
-      const [services, events] = await Promise.all([
+      let [services, events] = await Promise.all([
         apiCall('/services'),
         apiCall('/events')
       ]);
+      services = services || [];
+      events = events || [];
 
       // Update counters
       document.getElementById('overview-services-count').textContent = services.length;
@@ -126,14 +128,16 @@ document.addEventListener('DOMContentLoaded', () => {
       services.forEach(s => {
         // we can fetch volumes list separately if needed, but let's query volumes directly
       });
-      const volumes = await apiCall('/volumes');
+      let volumes = await apiCall('/volumes');
+      volumes = volumes || [];
       document.getElementById('overview-volumes-count').textContent = volumes.length;
 
       // Backups count total
       let totalBackups = 0;
       for (const vol of volumes) {
         try {
-          const backups = await apiCall(`/volumes/${vol.name}/backups`);
+          let backups = await apiCall(`/volumes/${vol.name}/backups`);
+          backups = backups || [];
           totalBackups += backups.length;
         } catch (e) {}
       }
@@ -187,7 +191,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchVal = document.getElementById('input-search-services').value.toLowerCase();
     
     try {
-      const services = await apiCall('/services');
+      let services = await apiCall('/services');
+      services = services || [];
       servicesCache = services;
       
       container.innerHTML = '';
@@ -342,7 +347,8 @@ document.addEventListener('DOMContentLoaded', () => {
     historyList.innerHTML = '<p class="text-muted">Loading deploy history...</p>';
 
     try {
-      const deploys = await apiCall(`/services/${serviceName}/deploys`);
+      let deploys = await apiCall(`/services/${serviceName}/deploys`);
+      deploys = deploys || [];
       historyList.innerHTML = '';
       if (deploys.length === 0) {
         historyList.innerHTML = '<p class="text-muted">No deployments found.</p>';
@@ -485,7 +491,8 @@ document.addEventListener('DOMContentLoaded', () => {
     tbody.innerHTML = '<tr><td colspan="5" class="text-center">Loading volumes...</td></tr>';
     
     try {
-      const volumes = await apiCall('/volumes');
+      let volumes = await apiCall('/volumes');
+      volumes = volumes || [];
       tbody.innerHTML = '';
 
       if (volumes.length === 0) {
@@ -554,7 +561,8 @@ document.addEventListener('DOMContentLoaded', () => {
     listBody.innerHTML = '<p class="text-muted text-center py-4">Loading backups...</p>';
 
     try {
-      const backups = await apiCall(`/volumes/${volumeName}/backups`);
+      let backups = await apiCall(`/volumes/${volumeName}/backups`);
+      backups = backups || [];
       listBody.innerHTML = '';
 
       if (backups.length === 0) {
@@ -630,7 +638,8 @@ document.addEventListener('DOMContentLoaded', () => {
     body.innerHTML = '<p class="text-muted text-center py-5">Loading events timeline...</p>';
 
     try {
-      const events = await apiCall('/events');
+      let events = await apiCall('/events');
+      events = events || [];
       body.innerHTML = '';
 
       if (events.length === 0) {
