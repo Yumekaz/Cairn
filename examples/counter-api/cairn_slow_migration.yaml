@@ -1,0 +1,22 @@
+# Intentional slow migration for mid-deploy crash recovery demos.
+# migration sleeps long enough to SIGTERM cairnd mid-workflow.
+name: counter-api
+kind: web
+image: ${CAIRN_ROOTFS}
+command: ["/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"]
+migration: "sleep 25"
+ports:
+  - host: 8080
+    container: 80
+volumes:
+  - name: counter-data
+    mount_path: /www
+healthcheck:
+  http_path: /index.html
+  interval: 2s
+  timeout: 1s
+  retries: 3
+  startup_grace: 2s
+restart:
+  policy: on-failure
+  max_retries: 3

@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,6 +15,16 @@ import (
 	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
 )
+
+// failDeployUnlessInterrupted marks a deploy failed only when the error is a
+// real step failure. Daemon kill (context.Canceled) leaves the deploy pending
+// so the next cairnd can resume the DuraFlow run.
+func (s *Server) failDeployUnlessInterrupted(deploy *api.Deploy, svc *api.Service, reason string, err error) {
+	if isWorkflowInterrupted(err) {
+		return
+	}
+	s.failDeploy(deploy, svc, reason)
+}
 
 // DeployInput represents the payload for a deployment workflow.
 type DeployInput struct {
@@ -246,11 +257,14 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 
 		taskID, err := s.runtime.CreateContainer(ctx.Context, taskCfg, taskName)
 		if err != nil {
-			s.failDeploy(deploy, svc, "Failed to create migration task container: "+err.Error())
+			s.failDeployUnlessInterrupted(deploy, svc, "Failed to create migration task container: "+err.Error(), err)
 			return err
 		}
 
 		if err := s.runtime.StartContainer(ctx.Context, taskID); err != nil {
+			if isWorkflowInterrupted(err) {
+				return err
+			}
 			s.runtime.RemoveContainer(ctx.Context, taskID)
 			s.failDeploy(deploy, svc, "Failed to start migration task container: "+err.Error())
 			return err
@@ -282,6 +296,11 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 		}
 
 		if runErr != nil {
+			// Do not remove the migration container or fail the deploy on daemon
+			// kill — leave state for resume after restart.
+			if isWorkflowInterrupted(runErr) {
+				return runErr
+			}
 			s.runtime.RemoveContainer(ctx.Context, taskID)
 			s.failDeploy(deploy, svc, "Migration execution context failed: "+runErr.Error())
 			return runErr
@@ -326,7 +345,7 @@ func (s *Server) execDeployCreateContainer(ctx *duraflow.StepContext) error {
 
 	candidateID, err := s.runtime.CreateContainer(ctx.Context, cfg, candidateName)
 	if err != nil {
-		s.failDeploy(deploy, svc, "Failed to create container: "+err.Error())
+		s.failDeployUnlessInterrupted(deploy, svc, "Failed to create container: "+err.Error(), err)
 		return err
 	}
 
@@ -356,6 +375,9 @@ func (s *Server) execDeployStartContainer(ctx *duraflow.StepContext) error {
 	}
 
 	if err := s.runtime.StartContainer(ctx.Context, candidateID); err != nil {
+		if isWorkflowInterrupted(err) {
+			return err
+		}
 		s.runtime.RemoveContainer(ctx.Context, candidateID)
 		s.failDeploy(deploy, svc, "Failed to start container: "+err.Error())
 		return err
@@ -392,10 +414,13 @@ func (s *Server) execDeployRunHealthCheck(ctx *duraflow.StepContext) error {
 	if hostPort > 0 && cfg.HealthCheck != nil {
 		info, err := s.runtime.InspectContainer(ctx.Context, candidateID)
 		if err != nil {
-			s.failDeploy(deploy, svc, "Failed to inspect container: "+err.Error())
+			s.failDeployUnlessInterrupted(deploy, svc, "Failed to inspect container: "+err.Error(), err)
 			return err
 		}
 		if err := RunHealthCheck(ctx.Context, cfg.HealthCheck, info.IPAddress, cfg.Ports[0].Container); err != nil {
+			if isWorkflowInterrupted(err) {
+				return err
+			}
 			logs := s.getContainerLogs(ctx.Context, candidateID)
 			s.runtime.StopContainer(ctx.Context, candidateID)
 			s.runtime.RemoveContainer(ctx.Context, candidateID)
@@ -470,41 +495,64 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 		candidateID = fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
 	}
 
-	if previousRuntimeID != "" {
-		_ = s.runtime.StopContainer(ctx.Context, previousRuntimeID)
-		_ = s.runtime.RemoveContainer(ctx.Context, previousRuntimeID)
+	deployID := deploy.ID
+	svcID := svc.ID
+	if deployID == "" {
+		return fmt.Errorf("route_traffic: empty deploy id")
 	}
 
-	deploy.Status = "success"
-	deploy.Stage = "completed"
-	deploy.HealthStatus = "healthy"
-	timeNow := time.Now()
-	deploy.CompletedAt = &timeNow
-	_ = s.store.UpdateDeploy(deploy)
+	// Prefer real container ID from inspect when State lost candidate_id after crash.
+	if info, err := s.runtime.InspectContainer(ctx.Context, candidateID); err == nil && info != nil && info.ID != "" {
+		candidateID = info.ID
+	}
+
+	// Commit metadata FIRST so a hang/failure stopping the old container cannot
+	// leave the deploy stuck in pending after a successful candidate is live.
+	if err := s.store.MarkDeployTerminal(deployID, "success", "healthy", ""); err != nil {
+		return fmt.Errorf("failed to mark deploy success: %w", err)
+	}
+	log.Printf("cairnd: deploy %s marked success (route_traffic)", deployID)
 
 	hostPort := 0
 	if len(cfg.Ports) > 0 {
 		hostPort = cfg.Ports[0].Host
 	}
 
-	svc.RuntimeID = candidateID
-	svc.DesiredState = "running"
-	svc.ActualState = "running"
-	svc.CurrentDeployID = deploymeta.AfterSuccess(deploy.ID)
-	if hostPort > 0 {
-		svc.Route = fmt.Sprintf("http://localhost:%d", hostPort)
-	} else {
-		svc.Route = "N/A"
+	dbSvc, err := s.store.GetService(svcID)
+	if err != nil || dbSvc == nil {
+		return fmt.Errorf("route_traffic: load service %s: %w", svcID, err)
 	}
-	_ = s.store.UpsertService(svc)
+	dbSvc.RuntimeID = candidateID
+	dbSvc.DesiredState = "running"
+	dbSvc.ActualState = "running"
+	dbSvc.CurrentDeployID = deploymeta.AfterSuccess(deployID)
+	if hostPort > 0 {
+		dbSvc.Route = fmt.Sprintf("http://localhost:%d", hostPort)
+	} else {
+		dbSvc.Route = "N/A"
+	}
+	if err := s.store.UpsertService(dbSvc); err != nil {
+		return fmt.Errorf("failed to update service after deploy: %w", err)
+	}
 
-	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
+	if check, err := s.store.GetDeploy(deployID); err != nil || check == nil || check.Status != "success" {
+		return fmt.Errorf("deploy %s not success after write (got %v, err %v)", deployID, check, err)
+	}
+
+	// Best-effort cleanup of previous runtime (after metadata commit).
+	if previousRuntimeID != "" && previousRuntimeID != candidateID {
+		_ = s.runtime.StopContainer(ctx.Context, previousRuntimeID)
+		_ = s.runtime.RemoveContainer(ctx.Context, previousRuntimeID)
+	}
+
+	candidateName := fmt.Sprintf("cairn-%s-%s", dbSvc.Name, deployID[:8])
+	depID := deployID
 	_ = s.store.CreateEvent(&api.Event{
 		ID:        uuid.New().String(),
-		ServiceID: &svc.ID,
-		DeployID:  &deploy.ID,
+		ServiceID: &dbSvc.ID,
+		DeployID:  &depID,
 		Type:      events.DeploySucceeded.String(),
-		Message:   fmt.Sprintf("Successfully deployed service %s (container: %s)", svc.Name, candidateName),
+		Message:   fmt.Sprintf("Successfully deployed service %s (container: %s)", dbSvc.Name, candidateName),
 	})
 	return nil
 }

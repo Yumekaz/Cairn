@@ -36,6 +36,7 @@ type Server struct {
 	startTime time.Time
 	duraflow  *duraflow.Engine
 	dfWorker  *dfworker.WorkerDaemon
+	dfStore   dfstore.EventStore
 }
 
 // NewServer initializes the Daemon API Server.
@@ -68,6 +69,7 @@ func NewServer(cfg *config.DaemonConfig, s *store.Store, r runtime.RuntimeBacken
 	// Initialize real engine
 	realDfEngine := dfengine.NewWorkflowEngine(dfStore, dfExecReg)
 	srv.duraflow.SetRealEngine(realDfEngine)
+	srv.dfStore = dfStore
 
 	// Register event synchronization hook from DuraFlow to Cairn
 	realDfEngine.OnEvent = srv.syncDuraFlowEventToCairn
@@ -116,10 +118,12 @@ func (s *Server) Start(ctx context.Context) error {
 	sched := NewScheduler(s.store, s.runtime, s.config.DataDir)
 	go sched.Start(ctx)
 
-	// Start background DuraFlow worker daemon
+	// Start background DuraFlow worker daemon (polls incomplete runs / reclaims leases
+	// after the previous process was killed mid-step).
 	if err := s.dfWorker.Start(); err != nil {
 		log.Printf("cairnd: Warning: failed to start background worker: %v", err)
 	}
+	s.logIncompleteWorkflowRecovery()
 
 	// Graceful worker shutdown
 	go func() {
@@ -130,6 +134,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start periodic service state and runtime reconciliation loop
 	go s.startReconciliationLoop(ctx)
+	// Heal deploy/workflow projections after crash-resume
+	go s.startDeployHealLoop(ctx)
 
 	// Start periodic metadata auto-backup loop
 	go s.startMetadataBackupLoop(ctx)
@@ -267,24 +273,23 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 	if s.runtime == nil {
 		return
 	}
+	// While ANY deploy is in flight, skip the whole reconciliation pass — including
+	// dangling-container cleanup. Otherwise we can delete the still-serving previous
+	// release (or a migration task) mid-recovery and leave metadata stuck.
+	if activeIDs, err := s.store.ListActiveDeployIDs(); err == nil && len(activeIDs) > 0 {
+		return
+	}
+
 	services, err := s.store.ListServices()
 	if err != nil {
 		log.Printf("cairnd: Failed to list services for reconciliation: %v\n", err)
 		return
 	}
 
-	activeDeploys, _ := s.store.ListActiveDeployIDs()
-
 	for _, svc := range services {
-		// Skip reconciliation if the service is currently being deployed
-		isActiveDeploy := false
-		for _, depID := range activeDeploys {
-			if svc.CurrentDeployID == depID {
-				isActiveDeploy = true
-				break
-			}
-		}
-		if isActiveDeploy {
+		// Skip reconciliation while any deploy is in-flight (candidates are no longer
+		// written to current_deploy_id until success, so do not key off that alone).
+		if active, err := s.store.ServiceHasActiveDeploy(svc.ID); err == nil && active {
 			continue
 		}
 
@@ -411,6 +416,187 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 	}
 }
 
+// reconcileDeployRecordFromWorkflow ensures the deploys table matches a finished
+// deploy workflow (especially after mid-run process death + DuraFlow resume).
+func (s *Server) reconcileDeployRecordFromWorkflow(w *api.Workflow, terminal string) {
+	if w == nil || w.Type != "deploy" || w.InputJSON == "" {
+		return
+	}
+	var input DeployInput
+	if err := json.Unmarshal([]byte(w.InputJSON), &input); err != nil {
+		return
+	}
+	if input.Deploy.ID == "" {
+		return
+	}
+	d, err := s.store.GetDeploy(input.Deploy.ID)
+	if err != nil || d == nil {
+		return
+	}
+	if d.Status == "success" || d.Status == "failed" {
+		return
+	}
+	now := time.Now()
+	d.CompletedAt = &now
+	d.Stage = "completed"
+	if terminal == "success" {
+		d.Status = "success"
+		d.HealthStatus = "healthy"
+		d.FailureReason = ""
+	} else {
+		d.Status = "failed"
+		d.HealthStatus = "unhealthy"
+		if d.FailureReason == "" {
+			d.FailureReason = "workflow failed (reconciled after recovery)"
+		}
+	}
+	_ = s.store.UpdateDeploy(d)
+}
+
+func (s *Server) startDeployHealLoop(ctx context.Context) {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.healFinishedDeployProjections()
+		}
+	}
+}
+
+// healFinishedDeployProjections closes Cairn deploy/workflow rows when DuraFlow
+// already finished the run (common after SIGTERM mid-step + worker resume).
+func (s *Server) healFinishedDeployProjections() {
+	if s.dfStore == nil {
+		return
+	}
+	all, err := s.store.ListWorkflows()
+	if err != nil {
+		return
+	}
+	for _, w := range all {
+		if w.Status == "success" {
+			s.reconcileDeployRecordFromWorkflow(w, "success")
+			s.promoteServiceAfterHealedDeploy(w)
+			continue
+		}
+		if w.Status == "failed" {
+			s.reconcileDeployRecordFromWorkflow(w, "failed")
+			continue
+		}
+		if w.Status != "running" && w.Status != "pending" {
+			continue
+		}
+		run, err := s.dfStore.GetRun(w.ID)
+		if err != nil || run == nil {
+			continue
+		}
+		switch run.Status {
+		case "COMPLETED":
+			w.Status = "success"
+			_ = s.store.UpdateWorkflow(w)
+			s.reconcileDeployRecordFromWorkflow(w, "success")
+			s.promoteServiceAfterHealedDeploy(w)
+		case "FAILED":
+			w.Status = "failed"
+			_ = s.store.UpdateWorkflow(w)
+			s.reconcileDeployRecordFromWorkflow(w, "failed")
+		}
+	}
+}
+
+func (s *Server) promoteServiceAfterHealedDeploy(w *api.Workflow) {
+	if w == nil || w.InputJSON == "" {
+		return
+	}
+	var input DeployInput
+	if err := json.Unmarshal([]byte(w.InputJSON), &input); err != nil {
+		return
+	}
+	if input.Deploy.ID == "" || input.Service.ID == "" {
+		return
+	}
+	d, err := s.store.GetDeploy(input.Deploy.ID)
+	if err != nil || d == nil || d.Status != "success" {
+		return
+	}
+	svc, err := s.store.GetService(input.Service.ID)
+	if err != nil || svc == nil {
+		return
+	}
+	if svc.CurrentDeployID == d.ID {
+		return
+	}
+	// Candidate name is deterministic; try to resolve runtime id.
+	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, d.ID[:8])
+	if s.runtime != nil {
+		if info, err := s.runtime.InspectContainer(context.Background(), candidateName); err == nil && info != nil && info.ID != "" {
+			svc.RuntimeID = info.ID
+		}
+	}
+	svc.CurrentDeployID = d.ID
+	svc.DesiredState = "running"
+	svc.ActualState = "running"
+	_ = s.store.UpsertService(svc)
+	log.Printf("cairnd: recovery: promoted service %s to deploy %s after heal", svc.Name, d.ID)
+}
+
+// logIncompleteWorkflowRecovery surfaces in-flight workflows and deploys after
+// process restart so operators can see crash recovery in the log.
+func (s *Server) logIncompleteWorkflowRecovery() {
+	wfs, err := s.store.ListRunningWorkflows()
+	if err != nil {
+		return
+	}
+	if len(wfs) > 0 {
+		log.Printf("cairnd: recovery: %d incomplete workflow(s) will be resumed by DuraFlow worker", len(wfs))
+		for _, w := range wfs {
+			log.Printf("cairnd: recovery: workflow id=%s type=%s status=%s step_index=%d", w.ID, w.Type, w.Status, w.CurrentStepIndex)
+		}
+	}
+	active, err := s.store.ListActiveDeployIDs()
+	if err == nil && len(active) > 0 {
+		log.Printf("cairnd: recovery: %d non-terminal deploy(s) still in flight", len(active))
+	}
+
+	// Heal cairn.db when DuraFlow already finished runs (crash mid-sync).
+	if s.dfStore != nil {
+		if incomplete, err := s.dfStore.GetIncompleteRuns(); err == nil {
+			log.Printf("cairnd: recovery: duraflow incomplete runs=%d", len(incomplete))
+		}
+	}
+	all, err := s.store.ListWorkflows()
+	if err == nil {
+		for _, w := range all {
+			if w.Status == "success" {
+				s.reconcileDeployRecordFromWorkflow(w, "success")
+			} else if w.Status == "failed" {
+				s.reconcileDeployRecordFromWorkflow(w, "failed")
+			} else if w.Status == "running" || w.Status == "pending" {
+				// If DuraFlow already COMPLETED/FAILED, close the Cairn projection.
+				if s.dfStore != nil {
+					if run, err := s.dfStore.GetRun(w.ID); err == nil && run != nil {
+						switch run.Status {
+						case "COMPLETED":
+							w.Status = "success"
+							_ = s.store.UpdateWorkflow(w)
+							s.reconcileDeployRecordFromWorkflow(w, "success")
+							log.Printf("cairnd: recovery: healed workflow %s to success from duraflow", w.ID)
+						case "FAILED":
+							w.Status = "failed"
+							_ = s.store.UpdateWorkflow(w)
+							s.reconcileDeployRecordFromWorkflow(w, "failed")
+							log.Printf("cairnd: recovery: healed workflow %s to failed from duraflow", w.ID)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func (s *Server) syncDuraFlowEventToCairn(ev *dfstore.Event) {
 	switch ev.EventType {
 	case dfengine.EventWorkflowRunCreated:
@@ -435,6 +621,9 @@ func (s *Server) syncDuraFlowEventToCairn(ev *dfstore.Event) {
 		if err == nil && w != nil {
 			w.Status = "success"
 			_ = s.store.UpdateWorkflow(w)
+			// After crash-resume the step path may have promoted the service but
+			// left the deploy row pending if a prior UpdateDeploy was skipped.
+			s.reconcileDeployRecordFromWorkflow(w, "success")
 		}
 
 	case dfengine.EventWorkflowFailed:
@@ -442,6 +631,7 @@ func (s *Server) syncDuraFlowEventToCairn(ev *dfstore.Event) {
 		if err == nil && w != nil {
 			w.Status = "failed"
 			_ = s.store.UpdateWorkflow(w)
+			s.reconcileDeployRecordFromWorkflow(w, "failed")
 		}
 
 	case dfengine.EventStepScheduled:

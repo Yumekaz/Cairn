@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/yumekaz/cairn/internal/api"
@@ -185,7 +186,7 @@ func (s *Store) UpdateDeploy(d *api.Deploy) error {
 		completedAt = *d.CompletedAt
 	}
 
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		UPDATE deploys SET
 			status = ?,
 			stage = ?,
@@ -195,7 +196,43 @@ func (s *Store) UpdateDeploy(d *api.Deploy) error {
 			failure_reason = ?
 		WHERE id = ?`,
 		d.Status, d.Stage, d.HealthStatus, d.StateTouched, completedAt, d.FailureReason, d.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("UpdateDeploy: no rows updated for id %s", d.ID)
+	}
+	return nil
+}
+
+// MarkDeployTerminal forces a deploy into a terminal status by id.
+func (s *Store) MarkDeployTerminal(id, status, health, failureReason string) error {
+	now := time.Now()
+	res, err := s.db.Exec(`
+		UPDATE deploys SET status = ?, stage = 'completed', health_status = ?,
+			completed_at = ?, failure_reason = ?
+		WHERE id = ?`, status, health, now, failureReason, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("MarkDeployTerminal: no rows for id %s", id)
+	}
+	// Ensure readers on other connections see the write promptly.
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	var got string
+	if err := s.db.QueryRow(`SELECT status FROM deploys WHERE id = ?`, id).Scan(&got); err != nil {
+		return err
+	}
+	if got != status {
+		return fmt.Errorf("MarkDeployTerminal: read-back status %q want %q for id %s", got, status, id)
+	}
+	return nil
 }
 
 // --- Volumes CRUD ---
@@ -411,4 +448,17 @@ func (s *Store) ListActiveDeployIDs() ([]string, error) {
 		}
 	}
 	return ids, nil
+}
+
+// ServiceHasActiveDeploy reports whether the service has a non-terminal deploy in flight.
+// Used by reconciliation so pending candidates (which are not current_deploy_id) still block recreate.
+func (s *Store) ServiceHasActiveDeploy(serviceID string) (bool, error) {
+	row := s.db.QueryRow(`
+		SELECT COUNT(1) FROM deploys
+		WHERE service_id = ? AND status != 'success' AND status != 'failed'`, serviceID)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
