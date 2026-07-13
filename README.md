@@ -10,6 +10,39 @@ Cairn sits cleanly above container runtimes (such as **Mini-Docker**) through an
 
 ---
 
+## Reliability claim (what this repo proves)
+
+**Single-node Cairn deploys stateful services on Mini-Docker and recovers correctly if you kill `cairnd` mid-deploy** — DuraFlow resumes work, failed candidates do not steal `current_deploy_id`, and traffic keeps serving from a healthy release.
+
+### Re-run the proofs yourself
+
+Sibling checkouts of **Cairn**, **DURAFLOW**, and **Mini-Docker** are required (see Quickstart). Mini-Docker daemon must be running.
+
+```bash
+export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"   # or your rootfs path
+export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
+export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
+
+# Private cold clone: wipe → clone three repos → build → clean_demo
+./scripts/cold_clone_verify.sh
+
+# Mid-deploy kill: baseline deploy → slow migration → SIGTERM cairnd → restart → heal
+./scripts/mid_deploy_crash_demo.sh
+```
+
+Also useful: `./scripts/clean_demo.sh` (deploy / restart / backup / broken-deploy / restore / dashboard).
+
+### Postmortems
+
+| Topic | Doc |
+| --- | --- |
+| Failed deploy left wrong `current_deploy_id` | [docs/postmortems/2026-07-failed-deploy-metadata.md](docs/postmortems/2026-07-failed-deploy-metadata.md) |
+| Mid-deploy `cairnd` kill + recovery | [docs/postmortems/2026-07-mid-deploy-crash-recovery.md](docs/postmortems/2026-07-mid-deploy-crash-recovery.md) |
+
+Stability note: both scripts were run **5/5 green** on a local Linux host after the heal/restart fixes above.
+
+---
+
 ## 🏗️ Architecture & Request Flow
 
 The following diagram illustrates how incoming client requests map to isolated container instances via Cairn's integrated virtual-host reverse proxy:
