@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/yumekaz/cairn/internal/api"
 	"gopkg.in/yaml.v3"
@@ -23,7 +25,7 @@ type DaemonConfig struct {
 func DefaultConfig() *DaemonConfig {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		homeDir = "/home/yumekaz" // Fallback
+		homeDir = os.TempDir() // last-resort fallback (never hardcode a username path)
 	}
 
 	cairnDir := filepath.Join(homeDir, ".cairn")
@@ -118,9 +120,71 @@ func SaveDaemonConfig(cfg *DaemonConfig, path string) error {
 	return encoder.Encode(cfg)
 }
 
+// ResolveServiceConfigPath accepts either a cairn.yaml file path or a directory
+// containing cairn.yaml and returns the path to the yaml file.
+func ResolveServiceConfigPath(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		candidate := filepath.Join(path, "cairn.yaml")
+		if _, err := os.Stat(candidate); err != nil {
+			return "", fmt.Errorf("directory %s does not contain cairn.yaml: %w", path, err)
+		}
+		return candidate, nil
+	}
+	return path, nil
+}
+
+// ResolveImagePath expands a service image/rootfs path. Relative paths are
+// resolved against the config file directory, then the process working
+// directory. Environment overrides:
+//   - CAIRN_ROOTFS: used when image is empty or the literal "${CAIRN_ROOTFS}"
+//   - MINI_DOCKER_ROOTFS: fallback if CAIRN_ROOTFS is unset
+func ResolveImagePath(image string, configFilePath string) string {
+	image = strings.TrimSpace(image)
+	if image == "" || image == "${CAIRN_ROOTFS}" || image == "$CAIRN_ROOTFS" {
+		if v := os.Getenv("CAIRN_ROOTFS"); v != "" {
+			return v
+		}
+		if v := os.Getenv("MINI_DOCKER_ROOTFS"); v != "" {
+			return v
+		}
+		return image
+	}
+	if filepath.IsAbs(image) {
+		return image
+	}
+	// Prefer path relative to the yaml file (portable examples).
+	if configFilePath != "" {
+		base := filepath.Dir(configFilePath)
+		candidate := filepath.Join(base, image)
+		if _, err := os.Stat(candidate); err == nil {
+			abs, err := filepath.Abs(candidate)
+			if err == nil {
+				return abs
+			}
+			return candidate
+		}
+	}
+	if abs, err := filepath.Abs(image); err == nil {
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+	return image
+}
+
 // ParseServiceConfig parses a service definition yaml (cairn.yaml).
+// path may be a file or a directory containing cairn.yaml.
 func ParseServiceConfig(path string) (*api.ServiceConfig, error) {
-	file, err := os.Open(path)
+	resolved, err := ResolveServiceConfigPath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -132,5 +196,6 @@ func ParseServiceConfig(path string) (*api.ServiceConfig, error) {
 		return nil, err
 	}
 
+	cfg.Image = ResolveImagePath(cfg.Image, resolved)
 	return &cfg, nil
 }

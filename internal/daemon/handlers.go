@@ -19,6 +19,7 @@ import (
 	"github.com/yumekaz/cairn/internal/api"
 	"github.com/yumekaz/cairn/internal/config"
 	"github.com/yumekaz/cairn/internal/daemon/dashboard"
+	"github.com/yumekaz/cairn/internal/deploymeta"
 	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
@@ -219,15 +220,21 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Capture last known-good deploy before creating a candidate. The candidate
+	// must not become current_deploy_id until the workflow succeeds.
+	lastSuccessfulDeployID := svc.CurrentDeployID
+
 	deployID := uuid.New().String()
+	prevID, keepCurrent := deploymeta.PrepareCandidate(lastSuccessfulDeployID, deployID)
 	deploy := &api.Deploy{
-		ID:           deployID,
-		ServiceID:    svc.ID,
-		Version:      "v1",
-		SourcePath:   "inline",
-		Status:       "pending",
-		Stage:        "starting",
-		HealthStatus: "unhealthy",
+		ID:               deployID,
+		ServiceID:        svc.ID,
+		Version:          "v1",
+		SourcePath:       "inline",
+		Status:           "pending",
+		Stage:            "starting",
+		HealthStatus:     "unhealthy",
+		PreviousDeployID: prevID,
 	}
 
 	// First upsert the service to satisfy the foreign key constraint in the deploys table
@@ -241,8 +248,9 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Now update the service with the active deploy ID
-	svc.CurrentDeployID = deployID
+	// Keep current_deploy_id on the last successful deploy (or empty) while the
+	// candidate is in flight. Never point current at a pending/failed candidate.
+	svc.CurrentDeployID = keepCurrent
 	if err := s.store.UpsertService(svc); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
@@ -916,7 +924,16 @@ func (s *Server) failDeploy(deploy *api.Deploy, svc *api.Service, reason string)
 	deploy.FailureReason = reason
 	timeNow := time.Now()
 	deploy.CompletedAt = &timeNow
-	s.store.UpdateDeploy(deploy)
+	_ = s.store.UpdateDeploy(deploy)
+
+	// Restore current_deploy_id to the last successful deploy (PreviousDeployID).
+	// Never leave current_deploy_id pointing at this failed candidate.
+	if dbSvc, err := s.store.GetService(svc.ID); err == nil && dbSvc != nil {
+		svc = dbSvc
+	}
+	restored := deploymeta.AfterFailure(deploy.PreviousDeployID)
+	svc.CurrentDeployID = restored
+	_ = s.store.UpsertService(svc)
 
 	s.store.CreateEvent(&api.Event{
 		ID:        uuid.New().String(),
@@ -2044,16 +2061,21 @@ func (s *Server) triggerServiceRedeploy(ctx context.Context, svc *api.Service) e
 		return fmt.Errorf("failed to load service config: %w", err)
 	}
 
+	// Same metadata rules as handleCreateService: never point current_deploy_id
+	// at a pending candidate; record previous successful deploy for failDeploy.
+	lastSuccessfulDeployID := svc.CurrentDeployID
 	deployID := uuid.New().String()
+	prevID, keepCurrent := deploymeta.PrepareCandidate(lastSuccessfulDeployID, deployID)
 	deploy := &api.Deploy{
-		ID:           deployID,
-		ServiceID:    svc.ID,
-		Version:      fmt.Sprintf("v_env_%d", time.Now().Unix()),
-		SourcePath:   "env_update",
-		Status:       "pending",
-		Stage:        "starting",
-		HealthStatus: "unhealthy",
-		CreatedAt:    time.Now(),
+		ID:               deployID,
+		ServiceID:        svc.ID,
+		Version:          fmt.Sprintf("v_env_%d", time.Now().Unix()),
+		SourcePath:       "env_update",
+		Status:           "pending",
+		Stage:            "starting",
+		HealthStatus:     "unhealthy",
+		PreviousDeployID: prevID,
+		CreatedAt:        time.Now(),
 	}
 
 	if err := s.store.CreateDeploy(deploy); err != nil {
@@ -2061,7 +2083,7 @@ func (s *Server) triggerServiceRedeploy(ctx context.Context, svc *api.Service) e
 	}
 
 	previousRuntimeID := svc.RuntimeID
-	svc.CurrentDeployID = deployID
+	svc.CurrentDeployID = keepCurrent
 	if err := s.store.UpsertService(svc); err != nil {
 		return err
 	}

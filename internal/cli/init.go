@@ -43,12 +43,14 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		// Check if mini-docker is installed in standard path
-		miniDockerPath := "/home/yumekaz/Desktop/Mini-Docker/mini_docker"
-		if _, err := os.Stat(miniDockerPath); err == nil {
-			fmt.Printf("Found Mini-Docker workspace at: %s\n", miniDockerPath)
+		// Discover Mini-Docker rootfs without hardcoding a username path
+		if root := os.Getenv("CAIRN_ROOTFS"); root != "" {
+			fmt.Printf("CAIRN_ROOTFS: %s\n", root)
+		} else if root := os.Getenv("MINI_DOCKER_ROOTFS"); root != "" {
+			fmt.Printf("MINI_DOCKER_ROOTFS: %s\n", root)
 		} else {
-			fmt.Println("Warning: Mini-Docker codebase was not found in ~/Desktop/Mini-Docker. Make sure it is installed and running.")
+			fmt.Println("Tip: export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs for portable examples.")
+			fmt.Println("     Then run: cairn doctor && scripts/clean_demo.sh")
 		}
 
 		fmt.Println("Initialization completed successfully. You can now start the daemon using 'cairn daemon start'.")

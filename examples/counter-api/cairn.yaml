@@ -1,6 +1,7 @@
 name: counter-api
 kind: web
-image: /home/yumekaz/Desktop/Mini-Docker/rootfs
+# Resolved via CAIRN_ROOTFS / MINI_DOCKER_ROOTFS env (see scripts/clean_demo.sh)
+image: ${CAIRN_ROOTFS}
 command: ["/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"]
 ports:
   - host: 8080

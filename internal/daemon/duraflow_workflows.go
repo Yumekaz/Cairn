@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/yumekaz/cairn/internal/api"
+	"github.com/yumekaz/cairn/internal/deploymeta"
 	"github.com/yumekaz/cairn/internal/duraflow"
 	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
@@ -450,6 +451,7 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 		svc.RuntimeID = ""
 		svc.DesiredState = "active"
 		svc.ActualState = "active"
+		svc.CurrentDeployID = deploymeta.AfterSuccess(deploy.ID)
 		svc.Route = "N/A"
 		_ = s.store.UpsertService(svc)
 
@@ -488,6 +490,7 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 	svc.RuntimeID = candidateID
 	svc.DesiredState = "running"
 	svc.ActualState = "running"
+	svc.CurrentDeployID = deploymeta.AfterSuccess(deploy.ID)
 	if hostPort > 0 {
 		svc.Route = fmt.Sprintf("http://localhost:%d", hostPort)
 	} else {

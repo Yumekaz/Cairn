@@ -91,6 +91,41 @@ restart:
 	}
 }
 
+func TestResolveServiceConfigPathDirectory(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "cairn.yaml")
+	content := "name: dir-app\nkind: web\nimage: ${CAIRN_ROOTFS}\n"
+	if err := os.WriteFile(yamlPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// File path
+	gotFile, err := ResolveServiceConfigPath(yamlPath)
+	if err != nil || gotFile != yamlPath {
+		t.Fatalf("file resolve: %v %q", err, gotFile)
+	}
+	// Directory path
+	gotDir, err := ResolveServiceConfigPath(dir)
+	if err != nil || gotDir != yamlPath {
+		t.Fatalf("dir resolve: %v %q", err, gotDir)
+	}
+
+	t.Setenv("CAIRN_ROOTFS", "/resolved/rootfs")
+	cfg, err := ParseServiceConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "dir-app" {
+		t.Fatalf("name: %s", cfg.Name)
+	}
+	if cfg.Image != "/resolved/rootfs" {
+		t.Fatalf("image should resolve via CAIRN_ROOTFS, got %q", cfg.Image)
+	}
+	// Absolute Desktop path must not be required
+	if filepath.Base(cfg.Image) == "Desktop" {
+		t.Fatal("unexpected Desktop hardcode")
+	}
+}
+
 func TestParseServiceConfigInvalid(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "cairn-service-invalid-*.yaml")
 	if err != nil {

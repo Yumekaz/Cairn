@@ -80,18 +80,32 @@ Compile and configure Cairn using the automated script:
 ```
 *This compiles the `cairn` CLI and `cairnd` daemon, initializes configurations in `~/.cairn/`, and moves binaries to `$HOME/.local/bin/`.*
 
-### 2. Start the Runtime Daemon
-Run the Mini-Docker runtime daemon in the background:
+### 2. Point at a Mini-Docker rootfs (no hardcoded paths)
 ```bash
-sudo python3 -m mini_docker daemon --socket-mode 666
+export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
 ```
 
-### 3. Initialize & Launch Cairn
-Initialize Cairn's database structure and start the daemon:
+### 3. Start the Runtime Daemon (single instance)
+```bash
+sudo python3 -m mini_docker daemon \
+  --socket "$MINI_DOCKER_SOCKET" \
+  --socket-mode 666
+```
+
+### 4. Initialize, doctor, and launch Cairn
 ```bash
 cairn init
+cairn doctor
 cairnd
 ```
+
+### 5. Portable end-to-end demo
+```bash
+./scripts/clean_demo.sh
+# or: make demo
+```
+See [docs/quickstart.md](docs/quickstart.md) and the failed-deploy postmortem under [docs/postmortems/](docs/postmortems/).
 
 ---
 

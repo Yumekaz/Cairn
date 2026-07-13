@@ -1,5 +1,5 @@
 name: db-cleanup-job
 kind: cron
-image: /home/yumekaz/Desktop/Mini-Docker/rootfs
+image: ${CAIRN_ROOTFS}
 schedule: "0 0 * * *"  # Run daily at midnight
 command: ["/bin/sh", "-c", "echo 'Running database cleanup task...'; echo 'Done.'"]

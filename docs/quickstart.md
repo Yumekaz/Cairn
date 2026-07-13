@@ -44,9 +44,17 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## 🐋 Step 2: Start Mini-Docker Daemon
 
-Cairn uses Mini-Docker as its containerization runtime backend. Start the Mini-Docker daemon as root (in a separate terminal) and allow access:
+Cairn uses Mini-Docker as its containerization runtime backend. Start **one** Mini-Docker daemon as root (dual daemons on the same socket cause EOF create failures):
+
 ```bash
-sudo python3 -m mini_docker daemon --socket-mode 666
+# Point this at your Mini-Docker checkout rootfs for examples
+export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
+
+sudo mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")"
+sudo python3 -m mini_docker daemon \
+  --socket "$MINI_DOCKER_SOCKET" \
+  --socket-mode 666
 ```
 
 ---
@@ -57,19 +65,38 @@ sudo python3 -m mini_docker daemon --socket-mode 666
    ```bash
    cairn init
    ```
-2. Start the control plane daemon:
+2. Check readiness:
+   ```bash
+   cairn doctor
+   ```
+3. Start the control plane daemon:
    ```bash
    cairnd
    # or
    cairn daemon start
    ```
 
+### One-shot portable demo
+
+From a cold machine (after Mini-Docker rootfs is available):
+
+```bash
+export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+./scripts/clean_demo.sh
+# or: make demo
+```
+
+This starts Mini-Docker if needed, starts `cairnd`, deploys `examples/counter-api` **by directory**, restarts, backs up, rejects a broken deploy, restores, and checks the dashboard.
+
 ---
 
 ## 📦 Step 4: Deploy your First App
 
-Deploy the bundled stateful `counter-api` application:
+Deploy the bundled stateful `counter-api` application (file **or** directory containing `cairn.yaml`):
 ```bash
+export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+cairn deploy examples/counter-api
+# equivalent:
 cairn deploy examples/counter-api/cairn.yaml
 ```
 

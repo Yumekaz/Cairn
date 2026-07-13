@@ -1,0 +1,26 @@
+name: smoke
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  unit-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Unit tests (core packages)
+        run: |
+          go test ./internal/deploymeta/ ./internal/config/ ./internal/preflight/ ./internal/store/ ./internal/daemon/ -count=1
+      - name: Build binaries
+        run: |
+          go build -o bin/cairn ./cmd/cairn
+          go build -o bin/cairnd ./cmd/cairnd
+      - name: Demo script dry syntax check
+        run: |
+          bash -n scripts/clean_demo.sh
+          test -x scripts/clean_demo.sh || chmod +x scripts/clean_demo.sh

@@ -62,16 +62,17 @@ var inspectCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("ID:              %s\n", s.ID)
-		fmt.Printf("Name:            %s\n", s.Name)
-		fmt.Printf("Kind:            %s\n", s.Kind)
-		fmt.Printf("Runtime Backend: %s\n", s.RuntimeBackend)
-		fmt.Printf("Runtime ID:      %s\n", s.RuntimeID)
-		fmt.Printf("Desired State:   %s\n", s.DesiredState)
-		fmt.Printf("Actual State:    %s\n", s.ActualState)
-		fmt.Printf("Route:           %s\n", s.Route)
-		fmt.Printf("Created At:      %s\n", s.CreatedAt.Format("2006-01-02 15:04:05"))
-		fmt.Printf("Updated At:      %s\n", s.UpdatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Printf("ID:                %s\n", s.ID)
+		fmt.Printf("Name:              %s\n", s.Name)
+		fmt.Printf("Kind:              %s\n", s.Kind)
+		fmt.Printf("Runtime Backend:   %s\n", s.RuntimeBackend)
+		fmt.Printf("Runtime ID:        %s\n", s.RuntimeID)
+		fmt.Printf("Current Deploy ID: %s\n", s.CurrentDeployID)
+		fmt.Printf("Desired State:     %s\n", s.DesiredState)
+		fmt.Printf("Actual State:      %s\n", s.ActualState)
+		fmt.Printf("Route:             %s\n", s.Route)
+		fmt.Printf("Created At:        %s\n", s.CreatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Printf("Updated At:        %s\n", s.UpdatedAt.Format("2006-01-02 15:04:05"))
 		return nil
 	},
 }
