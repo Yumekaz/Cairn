@@ -28,7 +28,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (hash === '#/overview') {
       document.getElementById('nav-overview').classList.add('active');
-      document.getElementById('panel-overview').classList.remove('panel-overview');
       document.getElementById('panel-overview').classList.remove('hidden');
       pageTitle.textContent = 'Overview';
       pageSubtitle.textContent = 'Control plane metrics and cluster status';
@@ -151,11 +150,15 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         services.slice(0, 5).forEach(s => {
           const tr = document.createElement('tr');
+          const name = escapeHtml(s.name || '');
+          const kind = escapeHtml(s.kind || 'unknown');
+          const state = escapeHtml(s.actual_state || 'unknown');
+          const route = escapeHtml(s.route || 'N/A');
           tr.innerHTML = `
-            <td><span class="font-bold">${s.name}</span></td>
-            <td><span class="badge badge-secondary" style="background-color:rgba(255,255,255,0.05);color:var(--text-muted);border:none;">${s.kind}</span></td>
-            <td><span class="badge ${s.actual_state}">${s.actual_state}</span></td>
-            <td><span class="text-mono">${s.route || 'N/A'}</span></td>
+            <td><span class="font-bold service-name-cell" title="${name}">${name}</span></td>
+            <td><span class="badge badge-kind">${kind}</span></td>
+            <td><span class="badge ${state}">${state}</span></td>
+            <td><span class="text-mono route-cell" title="${route}">${route}</span></td>
           `;
           tr.style.cursor = 'pointer';
           tr.addEventListener('click', () => showServiceDetail(s.name));
