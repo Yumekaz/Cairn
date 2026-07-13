@@ -8,6 +8,10 @@ Cairn is a CLI-first, single-node Platform-as-a-Service (PaaS) built for orchest
 
 Cairn sits cleanly above container runtimes (such as **Mini-Docker**) through an adapter abstraction layer, managing system states, routing topologies, and data lifecycles.
 
+### Stack story (portfolio map)
+
+Cairn is the control plane of a six-project stack: **Cairn → Mini-Docker → DuraFlow**, with **FailForge** testing **MiniDB** and **Coordination-service**. For the architecture diagram, repo map, postmortem proof table, and cold-cloneable demo commands, see **[docs/STACK.md](docs/STACK.md)**.
+
 ---
 
 ## Reliability claim (what this repo proves)
