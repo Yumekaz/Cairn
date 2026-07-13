@@ -132,16 +132,15 @@ Expect dramatic improvement after the QUORUM/RAW fixes; intermittent residual ER
 cd FAILFORGE
 go build -o bin/failforge ./cmd/failforge
 
-# Prefer portable sibling path (see failforge_coordination.yml).
-# If the yml still embeds an absolute path, set:
-#   export COORD_ROOT="$(pwd)/../Coordination-service"
-# and adjust the command line until portableize lands (Phase 3).
+# Optional if Coordination is not at ../Coordination-service
+# export COORD_ROOT=/path/to/Coordination-service
 
 ./bin/failforge run failforge_coordination.yml --seed 42
 ./bin/failforge report runs/coordination-42
 ```
 
-Checkers: `lock_exclusivity`, `no_two_leaders`.
+Checkers: `lock_exclusivity`, `no_two_leaders`.  
+Cert note: [Coordination seed-42 cert](https://github.com/Yumekaz/Coordination-service/blob/main/docs/postmortems/2026-07-failforge-seed42-cert.md).
 
 ---
 
