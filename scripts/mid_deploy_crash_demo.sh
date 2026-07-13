@@ -2,12 +2,15 @@
 # Live proof: kill cairnd mid-deploy, restart, DuraFlow resumes cleanly.
 #
 # Prerequisites: Mini-Docker daemon up, CAIRN_ROOTFS set (or discoverable).
-# Usage: ./scripts/mid_deploy_crash_demo.sh
+# Usage:
+#   ./scripts/mid_deploy_crash_demo.sh
+#   KILL_SIGNAL=SIGKILL ./scripts/mid_deploy_crash_demo.sh   # F2
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="${ROOT}/bin:${HOME}/.local/bin:${PATH}"
+KILL_SIGNAL="${KILL_SIGNAL:-SIGTERM}"
 
 log() { echo "[crash-demo] $*"; }
 die() { echo "[crash-demo] ERROR: $*" >&2; exit 1; }
@@ -67,8 +70,13 @@ sleep 3
 PIDFILE="${HOME}/.cairn/cairnd.pid"
 [[ -f "$PIDFILE" ]] || die "cairnd.pid missing"
 CAIRND_PID="$(cat "$PIDFILE")"
-log "Killing cairnd mid-deploy (PID $CAIRND_PID) with SIGTERM"
-kill -TERM "$CAIRND_PID" 2>/dev/null || kill -KILL "$CAIRND_PID"
+case "$KILL_SIGNAL" in
+  SIGTERM|TERM|15) SIG_NUM=TERM ;;
+  SIGKILL|KILL|9)  SIG_NUM=KILL ;;
+  *) die "unsupported KILL_SIGNAL=$KILL_SIGNAL (use SIGTERM or SIGKILL)" ;;
+esac
+log "Killing cairnd mid-deploy (PID $CAIRND_PID) with $KILL_SIGNAL"
+kill -s "$SIG_NUM" "$CAIRND_PID" 2>/dev/null || true
 # Wait for deploy client to notice
 sleep 1
 kill -0 "$DEPLOY_PID" 2>/dev/null && wait "$DEPLOY_PID" 2>/dev/null || true
@@ -135,9 +143,11 @@ done
 # Traffic must work
 curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q CRASH_DEMO_OK || die "service not serving after recovery"
 
-# No non-terminal deploys left for counter-api (ignore other leftover services)
-python3 - <<'PY'
+# counter-api only: no pending deploys; current is success; baseline not corrupted.
+# Accept either: (a) resumed deploy promoted to current, or (b) failed clean, baseline current.
+python3 - <<PY
 import sqlite3, os
+baseline = "$BASELINE"
 con=sqlite3.connect(os.path.expanduser("~/.cairn/cairn.db"))
 sid=con.execute("SELECT id FROM services WHERE name='counter-api'").fetchone()[0]
 pending=list(con.execute(
@@ -150,6 +160,8 @@ assert svc[1] == "running", svc
 assert svc[2], svc
 st=con.execute("SELECT status FROM deploys WHERE id=?", (svc[0],)).fetchone()
 assert st and st[0] == "success", st
+# If current still baseline, that is fail-clean recovery; if newer success, resume promoted.
+print("baseline", baseline, "current", svc[0])
 print("METADATA_RECOVERY_OK")
 PY
 

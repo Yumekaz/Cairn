@@ -1,4 +1,4 @@
-.PHONY: build clean test smoke run-daemon run-cli demo
+.PHONY: build clean test smoke demo gate matrix run-daemon run-cli
 
 GO := $(shell which go 2>/dev/null || echo go)
 
@@ -15,8 +15,18 @@ test:
 
 # CI-friendly smoke: unit tests + build + demo script syntax
 smoke: test build
-	bash -n scripts/clean_demo.sh
-	@echo "smoke OK (live demo: make demo with Mini-Docker + sudo as needed)"
+	@for s in scripts/*.sh; do bash -n "$$s"; done
+	@echo "smoke OK (full gate: make gate — needs Mini-Docker)"
+
+# Local reliability gate (units + optional live demos)
+gate: build
+	chmod +x scripts/*.sh
+	N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh
+
+# Failure matrix F1–F4,F6
+matrix: build
+	chmod +x scripts/*.sh
+	CASE=F1,F2,F3,F4,F6 ./scripts/failure_matrix.sh
 
 # Full cold-start demo (requires Mini-Docker rootfs + daemon)
 demo: build

@@ -23,14 +23,23 @@ export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"   # or your rootfs path
 export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
 export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
 
+# One command (unit + crash recovery + optional cold clone)
+N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh
+
 # Private cold clone: wipe → clone three repos → build → clean_demo
 ./scripts/cold_clone_verify.sh
 
-# Mid-deploy kill: baseline deploy → slow migration → SIGTERM cairnd → restart → heal
+# Mid-deploy kill: baseline → slow migration → SIGTERM/SIGKILL cairnd → restart → heal
 ./scripts/mid_deploy_crash_demo.sh
+KILL_SIGNAL=SIGKILL ./scripts/mid_deploy_crash_demo.sh
+
+# Failure matrix F1–F4,F6 (see docs/roadmap.md Phase 17)
+./scripts/failure_matrix.sh
 ```
 
 Also useful: `./scripts/clean_demo.sh` (deploy / restart / backup / broken-deploy / restore / dashboard).
+
+GitHub Actions runs **unit + build only**. Full gate needs local Mini-Docker.
 
 ### Postmortems
 
@@ -39,7 +48,7 @@ Also useful: `./scripts/clean_demo.sh` (deploy / restart / backup / broken-deplo
 | Failed deploy left wrong `current_deploy_id` | [docs/postmortems/2026-07-failed-deploy-metadata.md](docs/postmortems/2026-07-failed-deploy-metadata.md) |
 | Mid-deploy `cairnd` kill + recovery | [docs/postmortems/2026-07-mid-deploy-crash-recovery.md](docs/postmortems/2026-07-mid-deploy-crash-recovery.md) |
 
-Stability note: both scripts were run **5/5 green** on a local Linux host after the heal/restart fixes above.
+Stability note: cold_clone + mid_deploy were **5/5 green** locally after heal/restart fixes; run `./scripts/stability_gate.sh` to re-verify.
 
 ---
 

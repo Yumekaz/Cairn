@@ -22,5 +22,7 @@ jobs:
           go build -o bin/cairnd ./cmd/cairnd
       - name: Demo script dry syntax check
         run: |
-          bash -n scripts/clean_demo.sh
-          test -x scripts/clean_demo.sh || chmod +x scripts/clean_demo.sh
+          for s in scripts/*.sh; do bash -n "$s"; done
+      - name: Note on full reliability gate
+        run: |
+          echo "Full stability_gate.sh / failure_matrix.sh require Linux + Mini-Docker root and are not run on GitHub-hosted runners."
