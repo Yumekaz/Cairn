@@ -24,21 +24,29 @@ echo "overlay" | sudo tee -a /etc/modules
 
 ---
 
-## ⚙️ Step 1: Install Cairn
+## ⚙️ Step 1: Sibling layout + Install Cairn
 
-Run the installer script from the root of the Cairn repository:
+Cairn depends on a **local DuraFlow checkout** (`go.mod` replace → `../DURAFLOW`). Clone three repos side by side:
+
 ```bash
+mkdir -p ~/src && cd ~/src
+git clone git@github.com:Yumekaz/Cairn.git
+git clone git@github.com:Yumekaz/DURAFLOW.git
+git clone git@github.com:Yumekaz/Mini-Docker.git
+cd Cairn
 ./scripts/install.sh
 ```
-This script will:
-- Compile the `cairn` CLI client and `cairnd` control daemon.
-- Install the binaries to `~/.local/bin/` (or `/usr/local/bin` if run as root).
-- Create the default directory layout in `~/.cairn/`.
 
-Make sure `~/.local/bin` is in your environment `PATH`. If not, add it to your shell config (e.g. `~/.bashrc`):
+The installer will:
+- Refuse to build if `../DURAFLOW` is missing (or honor `DURAFLOW_PATH`)
+- Compile `cairn` / `cairnd` into `./bin/` and install under `~/.local/bin/`
+- Create `~/.cairn/` layout
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+**Private verification without other people:** `./scripts/cold_clone_verify.sh` re-clones into `~/Desktop/cold-clone-check` and runs the full demo.
 
 ---
 

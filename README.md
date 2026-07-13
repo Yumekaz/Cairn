@@ -71,41 +71,57 @@ graph TD
 
 ## 🚀 Quickstart Installation
 
-Ensure Go `v1.22+`, Python `v3.10+`, and `OverlayFS` are configured on your host system.
+**Sibling layout required** (DuraFlow is a local module replace, not a published version pin yet):
 
-### 1. Run the Installer
-Compile and configure Cairn using the automated script:
+```text
+parent/
+  Cairn/          # this repo
+  DURAFLOW/       # git clone git@github.com:Yumekaz/DURAFLOW.git
+  Mini-Docker/    # git clone git@github.com:Yumekaz/Mini-Docker.git
+```
+
+Go `v1.22+`, Python `v3.10+`, OverlayFS. Mini-Docker daemon needs root (or carefully configured rootless).
+
+### 1. Clone siblings + install
 ```bash
+mkdir -p ~/src && cd ~/src
+git clone git@github.com:Yumekaz/Cairn.git
+git clone git@github.com:Yumekaz/DURAFLOW.git
+git clone git@github.com:Yumekaz/Mini-Docker.git
+cd Cairn
 ./scripts/install.sh
 ```
-*This compiles the `cairn` CLI and `cairnd` daemon, initializes configurations in `~/.cairn/`, and moves binaries to `$HOME/.local/bin/`.*
 
-### 2. Point at a Mini-Docker rootfs (no hardcoded paths)
+### 2. Runtime env
 ```bash
-export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
 export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
+export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-### 3. Start the Runtime Daemon (single instance)
+### 3. Start Mini-Docker (single daemon)
 ```bash
-sudo python3 -m mini_docker daemon \
+sudo mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")"
+sudo env PYTHONPATH="$PYTHONPATH" python3 -m mini_docker daemon \
   --socket "$MINI_DOCKER_SOCKET" \
   --socket-mode 666
 ```
 
-### 4. Initialize, doctor, and launch Cairn
+### 4. Init + doctor + demo
 ```bash
 cairn init
 cairn doctor
-cairnd
+./scripts/clean_demo.sh
 ```
 
-### 5. Portable end-to-end demo
+### Private cold-clone self-check (no friends required)
+From a Cairn checkout you already trust:
 ```bash
-./scripts/clean_demo.sh
-# or: make demo
+./scripts/cold_clone_verify.sh
+# writes ~/Desktop/cold-clone-check/ and runs clean_demo from fresh clones
 ```
-See [docs/quickstart.md](docs/quickstart.md) and the failed-deploy postmortem under [docs/postmortems/](docs/postmortems/).
+
+See [docs/quickstart.md](docs/quickstart.md) and [docs/postmortems/](docs/postmortems/).
 
 ---
 

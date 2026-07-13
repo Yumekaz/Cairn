@@ -26,4 +26,6 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/yumekaz/duraflow => /home/yumekaz/Desktop/DURAFLOW
+// Local sibling checkout (clone DURAFLOW next to Cairn). Override for other layouts:
+//   go mod edit -replace=github.com/yumekaz/duraflow=/absolute/path/to/DURAFLOW
+replace github.com/yumekaz/duraflow => ../DURAFLOW
