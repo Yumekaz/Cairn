@@ -529,11 +529,22 @@ func (s *Server) promoteServiceAfterHealedDeploy(w *api.Workflow) {
 	if svc.CurrentDeployID == d.ID {
 		return
 	}
+	// Never demote to an older successful deploy. ListWorkflows is DESC, so a
+	// naive promote-all would walk newest→oldest and overwrite with antiques.
+	if svc.CurrentDeployID != "" {
+		cur, err := s.store.GetDeploy(svc.CurrentDeployID)
+		if err == nil && cur != nil && cur.Status == "success" && !d.CreatedAt.After(cur.CreatedAt) {
+			return
+		}
+	}
 	// Candidate name is deterministic; try to resolve runtime id.
 	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, d.ID[:8])
 	if s.runtime != nil {
 		if info, err := s.runtime.InspectContainer(context.Background(), candidateName); err == nil && info != nil && info.ID != "" {
 			svc.RuntimeID = info.ID
+		} else if svc.RuntimeID == "" {
+			// Do not clear a working runtime id when the candidate is already gone.
+			return
 		}
 	}
 	svc.CurrentDeployID = d.ID

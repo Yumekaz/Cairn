@@ -1031,14 +1031,44 @@ func (s *Server) handleRestartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	restarted := false
 	if svc.RuntimeID != "" {
-		if err := s.runtime.RestartContainer(r.Context(), svc.RuntimeID); err != nil {
-			s.error(w, http.StatusInternalServerError, "failed to restart container: "+err.Error())
+		if err := s.runtime.RestartContainer(r.Context(), svc.RuntimeID); err == nil {
+			restarted = true
+		} else {
+			// Container missing after Mini-Docker restart / cleanup: recreate from current deploy.
+			log.Printf("cairnd: restart of %s failed (%v); recreating from current deploy", svc.Name, err)
+			_ = s.runtime.RemoveContainer(r.Context(), svc.RuntimeID)
+		}
+	}
+	if !restarted {
+		if svc.CurrentDeployID == "" {
+			s.error(w, http.StatusBadRequest, "service has no current deploy to recreate")
 			return
 		}
-	} else {
-		s.error(w, http.StatusBadRequest, "service has no deployed container")
-		return
+		cfg, err := s.loadCurrentServiceConfig(svc)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to load deploy config: "+err.Error())
+			return
+		}
+		cfg.Environment = s.resolveEnvPlaceholders(r.Context(), s.mergeDatabaseEnvs(svc.ID, cfg.Environment))
+		candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, svc.CurrentDeployID[:8])
+		newID, err := s.runtime.CreateContainer(r.Context(), cfg, candidateName)
+		if err != nil {
+			// Name conflict: remove and retry once
+			_ = s.runtime.RemoveContainer(r.Context(), candidateName)
+			newID, err = s.runtime.CreateContainer(r.Context(), cfg, candidateName)
+		}
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to recreate container: "+err.Error())
+			return
+		}
+		if err := s.runtime.StartContainer(r.Context(), newID); err != nil {
+			_ = s.runtime.RemoveContainer(r.Context(), newID)
+			s.error(w, http.StatusInternalServerError, "failed to start recreated container: "+err.Error())
+			return
+		}
+		svc.RuntimeID = newID
 	}
 
 	svc.DesiredState = "running"
