@@ -11,7 +11,7 @@ This document outlines upcoming phases and **honest status** for reliability wor
 | Track | Focus | Status |
 | --- | --- | --- |
 | A | Event taxonomy (MLP §17) | **Done** — full deploy/health/route/backup/restore story + `clean_demo` asserts |
-| B | Continuous health / crash-loop | Pending |
+| B | Continuous health / crash-loop | **Done** — reconcile emits `ServiceRestarted`; crash-loop stop thrash (5/10m); F4 asserts event |
 | C | Rollback safety / state-touched | Pending |
 | D | Demo hygiene | Pending |
 

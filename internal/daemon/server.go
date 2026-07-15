@@ -12,13 +12,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/yumekaz/cairn/internal/api"
 	"github.com/yumekaz/cairn/internal/config"
 	"github.com/yumekaz/cairn/internal/duraflow"
+	"github.com/yumekaz/cairn/internal/events"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
 	dfengine "github.com/yumekaz/duraflow/pkg/engine"
@@ -37,6 +40,10 @@ type Server struct {
 	duraflow  *duraflow.Engine
 	dfWorker  *dfworker.WorkerDaemon
 	dfStore   dfstore.EventStore
+
+	// crashLoop tracks process-local auto-restart times for reconcile thrash bounds.
+	crashLoopMu sync.Mutex
+	crashLoop   *CrashLoopTracker
 }
 
 // NewServer initializes the Daemon API Server.
@@ -47,6 +54,7 @@ func NewServer(cfg *config.DaemonConfig, s *store.Store, r runtime.RuntimeBacken
 		runtime:   r,
 		config:    cfg,
 		startTime: time.Now(),
+		crashLoop: NewCrashLoopTracker(),
 	}
 
 	srv.duraflow = duraflow.NewEngine(s, r)
@@ -305,11 +313,16 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 					}
 				} else if err == nil {
 					// Container exists but is not running (e.g. following host reboot or container crash)
+					if s.crashLoopWouldTrip(svc.ID) {
+						s.stopForCrashLoop(ctx, svc, "container_stopped")
+						continue
+					}
 					log.Printf("cairnd: Service %s container %s is stopped. Restarting...\n", svc.Name, svc.RuntimeID)
 					if startErr := s.runtime.StartContainer(ctx, svc.RuntimeID); startErr == nil {
 						svc.ActualState = "running"
 						_ = s.store.UpsertService(svc)
 						runStateMatches = true
+						s.recordAutoRestartAndEmit(svc, "container_stopped")
 					} else {
 						log.Printf("cairnd: Failed to start container for service %s: %v\n", svc.Name, startErr)
 					}
@@ -318,6 +331,10 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 
 			if !runStateMatches {
 				// Recreate container
+				if s.crashLoopWouldTrip(svc.ID) {
+					s.stopForCrashLoop(ctx, svc, "container_missing")
+					continue
+				}
 				log.Printf("cairnd: Service %s container does not exist or failed. Recreating...\n", svc.Name)
 				if svc.CurrentDeployID == "" {
 					log.Printf("cairnd: Service %s has no current deployment configuration\n", svc.Name)
@@ -363,6 +380,7 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 				}
 				_ = s.store.UpsertService(svc)
 				log.Printf("cairnd: Service %s successfully recreated and started (ID: %s)\n", svc.Name, newID)
+				s.recordAutoRestartAndEmit(svc, "container_missing")
 			}
 		}
 	}
@@ -414,6 +432,75 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (s *Server) crashLoopWouldTrip(serviceID string) bool {
+	if s.crashLoop == nil {
+		return false
+	}
+	s.crashLoopMu.Lock()
+	defer s.crashLoopMu.Unlock()
+	return s.crashLoop.WouldTrip(serviceID, time.Now(), DefaultCrashLoopLimit, DefaultCrashLoopWindow)
+}
+
+func (s *Server) resetCrashLoop(serviceID string) {
+	if s.crashLoop == nil {
+		return
+	}
+	s.crashLoopMu.Lock()
+	defer s.crashLoopMu.Unlock()
+	s.crashLoop.Reset(serviceID)
+}
+
+// recordAutoRestartAndEmit records a successful reconcile auto-recover and emits ServiceRestarted.
+func (s *Server) recordAutoRestartAndEmit(svc *api.Service, reason string) {
+	if svc == nil {
+		return
+	}
+	now := time.Now()
+	var count int
+	if s.crashLoop != nil {
+		s.crashLoopMu.Lock()
+		count, _ = s.crashLoop.Record(svc.ID, now, DefaultCrashLoopLimit, DefaultCrashLoopWindow)
+		s.crashLoopMu.Unlock()
+	}
+	msg := fmt.Sprintf("Auto-recovered service %s (reason=%s, restarts_in_window=%d/%d)",
+		svc.Name, reason, count, DefaultCrashLoopLimit)
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		Type:      events.ServiceRestarted.String(),
+		Message:   msg,
+	})
+}
+
+// stopForCrashLoop stops auto-heal thrash: desired=stopped + ServiceStopped event.
+func (s *Server) stopForCrashLoop(ctx context.Context, svc *api.Service, reason string) {
+	if svc == nil {
+		return
+	}
+	count := 0
+	if s.crashLoop != nil {
+		s.crashLoopMu.Lock()
+		count = s.crashLoop.Count(svc.ID, time.Now(), DefaultCrashLoopWindow)
+		s.crashLoopMu.Unlock()
+	}
+	log.Printf("cairnd: crash loop for service %s (reason=%s, restarts_in_window=%d): stopping auto-heal\n",
+		svc.Name, reason, count)
+	if svc.RuntimeID != "" {
+		_ = s.runtime.StopContainer(ctx, svc.RuntimeID)
+	}
+	svc.DesiredState = "stopped"
+	svc.ActualState = "stopped"
+	_ = s.store.UpsertService(svc)
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		Type:      events.ServiceStopped.String(),
+		Message: fmt.Sprintf(
+			"crash loop: %d auto-restarts within %s (reason=%s); auto-heal stopped. Use 'cairn start %s' or 'cairn restart %s' to resume.",
+			count, DefaultCrashLoopWindow, reason, svc.Name, svc.Name),
+	})
 }
 
 // reconcileDeployRecordFromWorkflow ensures the deploys table matches a finished

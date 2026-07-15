@@ -280,8 +280,10 @@ PY
   done
   curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q F4_OK || die "F4: service did not recover"
   assert_counter_healthy >>"$LOG"
-  # Events should mention restart or recreate
-  cairn events counter-api 2>&1 | head -20 >>"$LOG" || true
+  # Reconcile (or CLI restart nudge) must leave a ServiceRestarted audit event
+  EVENTS_F4="$(cairn events 2>/dev/null || true)"
+  echo "$EVENTS_F4" | head -30 >>"$LOG" || true
+  echo "$EVENTS_F4" | grep -q ServiceRestarted || die "F4: missing ServiceRestarted event after container death recover"
   log "GREEN F4"
 }
 

@@ -1020,6 +1020,7 @@ func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.resetCrashLoop(svc.ID)
 
 	s.store.CreateEvent(&api.Event{
 		ID:        uuid.New().String(),
@@ -1125,6 +1126,7 @@ func (s *Server) handleRestartService(w http.ResponseWriter, r *http.Request) {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.resetCrashLoop(svc.ID)
 
 	s.store.CreateEvent(&api.Event{
 		ID:        uuid.New().String(),

@@ -8,7 +8,7 @@ Audit events are stored in SQLite and listed via `cairn events` / `cairn events 
 | --- | --- |
 | `DaemonStarted` / `DaemonStopped` | Daemon lifecycle |
 | `ServiceCreated` | First deploy of a new service name |
-| `ServiceStarted` / `ServiceStopped` / `ServiceRestarted` / `ServiceRemoved` | Service actions |
+| `ServiceStarted` / `ServiceStopped` / `ServiceRestarted` / `ServiceRemoved` | Service actions; **reconcile** auto-recover also emits `ServiceRestarted` (`container_stopped` / `container_missing`). Crash-loop (default 5 auto-restarts in 10m, process-local) sets desired=stopped and emits `ServiceStopped` with a crash-loop message. Manual `cairn start` / `restart` resets the counter. |
 | `DeployStarted` / `DeploySucceeded` / `DeployCompleted` / `DeployFailed` | Deploy workflow |
 | `RuntimeCreateStarted` / `RuntimeCreateCompleted` | Candidate container create |
 | `HealthCheckPassed` / `HealthCheckFailed` | Deploy health step |
@@ -30,6 +30,7 @@ Audit events are stored in SQLite and listed via `cairn events` / `cairn events 
 
 - Fine-grained migration sub-steps beyond deploy fail/success
 - Continuous post-deploy probe failures as `HealthCheckFailed` (deploy-time health is covered)
+- Separate `CrashLoopDetected` type (today: `ServiceStopped` + crash-loop message)
 - Multi-node events (Phase 18)
 
 ## Demo assertion
