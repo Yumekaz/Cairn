@@ -8,21 +8,42 @@ on:
 jobs:
   unit-and-build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Sibling layout: GITHUB_WORKSPACE/{Cairn,DURAFLOW} matches go.mod replace => ../DURAFLOW
+        working-directory: Cairn
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Cairn
+        uses: actions/checkout@v4
+        with:
+          path: Cairn
+
+      # go.mod: replace github.com/yumekaz/duraflow => ../DURAFLOW
+      - name: Checkout DuraFlow (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/DURAFLOW
+          path: DURAFLOW
+
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          # Match go.mod (1.26.x); 1.22.x cannot build this module.
+          go-version-file: Cairn/go.mod
+          cache-dependency-path: Cairn/go.sum
+
       - name: Unit tests (core packages)
         run: |
           go test ./internal/deploymeta/ ./internal/config/ ./internal/preflight/ ./internal/store/ ./internal/daemon/ -count=1
+
       - name: Build binaries
         run: |
           go build -o bin/cairn ./cmd/cairn
           go build -o bin/cairnd ./cmd/cairnd
+
       - name: Demo script dry syntax check
         run: |
           for s in scripts/*.sh; do bash -n "$s"; done
+
       - name: Note on full reliability gate
         run: |
           echo "Full stability_gate.sh / failure_matrix.sh require Linux + Mini-Docker root and are not run on GitHub-hosted runners."
