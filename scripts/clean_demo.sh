@@ -233,7 +233,17 @@ LOG "dashboard: OK"
 LOG "Event story (MLP §17 subset)"
 # Global timeline (backup/restore attach volume_id, not service_id)
 EVENTS_OUT="$(cairn events 2>/dev/null || true)"
-echo "$EVENTS_OUT" | head -50
+# Display only (never fail demo on truncation/SIGPIPE)
+printf '%s\n' "$EVENTS_OUT" | sed -n '1,50p' || true
+
+has_event() {
+  # Bash substring match — avoids pipefail/grep quirks on large timelines
+  case "$EVENTS_OUT" in
+    *"$1"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Explicit checks (die if missing) — full counter-api cycle + broken deploy
 for need in \
   DeployStarted RuntimeCreateStarted RuntimeCreateCompleted \
@@ -241,16 +251,14 @@ for need in \
   DeployFailed RoutePreserved \
   BackupStarted BackupSucceeded \
   RestoreStarted; do
-  echo "$EVENTS_OUT" | grep -q "$need" || die "missing event type in timeline: $need"
+  has_event "$need" || die "missing event type in timeline: $need"
 done
-echo "$EVENTS_OUT" | grep -qE 'RestoreCompleted|BackupRestored' || die "missing restore completion event"
+if ! has_event RestoreCompleted && ! has_event BackupRestored; then
+  die "missing restore completion event"
+fi
 # Optional MLP aliases (emitted alongside canonical names)
-if echo "$EVENTS_OUT" | grep -q DeployCompleted; then
-  LOG "alias DeployCompleted: present"
-fi
-if echo "$EVENTS_OUT" | grep -q BackupCompleted; then
-  LOG "alias BackupCompleted: present"
-fi
+has_event DeployCompleted && LOG "alias DeployCompleted: present"
+has_event BackupCompleted && LOG "alias BackupCompleted: present"
 LOG "event story: OK"
 
 LOG ""

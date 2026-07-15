@@ -282,8 +282,12 @@ PY
   assert_counter_healthy >>"$LOG"
   # Reconcile (or CLI restart nudge) must leave a ServiceRestarted audit event
   EVENTS_F4="$(cairn events 2>/dev/null || true)"
-  echo "$EVENTS_F4" | head -30 >>"$LOG" || true
-  echo "$EVENTS_F4" | grep -q ServiceRestarted || die "F4: missing ServiceRestarted event after container death recover"
+  printf '%s\n' "$EVENTS_F4" | sed -n '1,30p' >>"$LOG" || true
+  # Avoid pipefail+grep -q SIGPIPE false negatives (match found but pipeline fails)
+  case "$EVENTS_F4" in
+    *ServiceRestarted*) ;;
+    *) die "F4: missing ServiceRestarted event after container death recover" ;;
+  esac
   log "GREEN F4"
 }
 

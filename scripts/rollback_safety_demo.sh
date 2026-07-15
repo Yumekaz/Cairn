@@ -84,14 +84,20 @@ CUR="$(cairn inspect "$SVC" | awk -F': *' '/^Current Deploy ID:/{print $2}' | he
 
 LOG "Assert RollbackBlocked event"
 EVENTS="$(cairn events 2>/dev/null || true)"
-echo "$EVENTS" | grep -q RollbackBlocked || die "missing RollbackBlocked in event timeline"
+case "$EVENTS" in
+  *RollbackBlocked*) ;;
+  *) die "missing RollbackBlocked in event timeline" ;;
+esac
 LOG "RollbackBlocked: OK (rc=$RC)"
 
 if [[ "${FORCE:-0}" == "1" ]]; then
   LOG "Force rollback (FORCE=1)"
   cairn rollback "$SVC" --to "$BASE_DEPLOY" --force
   EVENTS2="$(cairn events 2>/dev/null || true)"
-  echo "$EVENTS2" | grep -q RollbackForced || die "missing RollbackForced after --force"
+  case "$EVENTS2" in
+    *RollbackForced*) ;;
+    *) die "missing RollbackForced after --force" ;;
+  esac
   LOG "RollbackForced: OK"
 else
   LOG "Skipping forced path (set FORCE=1 to exercise RollbackForced live)"
