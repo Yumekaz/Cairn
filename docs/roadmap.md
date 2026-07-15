@@ -12,7 +12,7 @@ This document outlines upcoming phases and **honest status** for reliability wor
 | --- | --- | --- |
 | A | Event taxonomy (MLP §17) | **Done** — full deploy/health/route/backup/restore story + `clean_demo` asserts |
 | B | Continuous health / crash-loop | **Done** — reconcile emits `ServiceRestarted`; crash-loop stop thrash (5/10m); F4 asserts event |
-| C | Rollback safety / state-touched | Pending |
+| C | Rollback safety / state-touched | **Done** — `RollbackBlocked`/`RollbackForced` events + unit tests + `scripts/rollback_safety_demo.sh` |
 | D | Demo hygiene | Pending |
 
 See session plan *Phase 19 — Single-node operational maturity*. Event reference: [events.md](events.md).

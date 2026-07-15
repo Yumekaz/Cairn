@@ -340,6 +340,9 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runWorkflowSync(ctx context.Context, wType string, input interface{}) (*api.Workflow, error) {
+	if s.duraflow == nil {
+		return nil, fmt.Errorf("duraflow engine not configured")
+	}
 	workflowID, err := s.duraflow.StartWorkflow(wType, input)
 	if err != nil {
 		log.Printf("cairnd: StartWorkflow failed: %v", err)
@@ -898,6 +901,13 @@ func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
 	if len(dangerousDeploys) > 0 && !req.Force {
 		msg := fmt.Sprintf("Rollback target '%s' is unsafe: %d intervening successful deployment(s) executed migrations and modified state since then (including deploy '%s'). Proceeding might cause data or schema mismatch.",
 			targetDeploy.ID[:8], len(dangerousDeploys), dangerousDeploys[0].ID[:8])
+		_ = s.store.CreateEvent(&api.Event{
+			ID:        uuid.New().String(),
+			ServiceID: &svc.ID,
+			DeployID:  &targetDeploy.ID,
+			Type:      events.RollbackBlocked.String(),
+			Message:   msg,
+		})
 		s.error(w, http.StatusConflict, msg)
 		return
 	}
@@ -932,6 +942,18 @@ func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.CreateDeploy(newDeploy); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if len(dangerousDeploys) > 0 && req.Force {
+		_ = s.store.CreateEvent(&api.Event{
+			ID:        uuid.New().String(),
+			ServiceID: &svc.ID,
+			DeployID:  &newDeployID,
+			Type:      events.RollbackForced.String(),
+			Message: fmt.Sprintf(
+				"Forced rollback of %s to deploy %s despite %d intervening state-touched deploy(s) (including %s)",
+				svc.Name, targetDeploy.ID[:8], len(dangerousDeploys), dangerousDeploys[0].ID[:8]),
+		})
 	}
 
 	// Record start event

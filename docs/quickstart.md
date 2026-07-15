@@ -157,6 +157,32 @@ curl http://localhost:8080/index.html
 
 ---
 
+## ⏪ Rollback safety (stateful deploys)
+
+When a deploy runs a **`migration:`** step successfully, Cairn marks that deploy `state_touched=true`. Rolling back **across** such deploys is unsafe (schema/data may not match the older binary).
+
+```bash
+# After a migration deploy, rollback to an older deploy id without --force:
+cairn rollback counter-api --to <older_deploy_id>
+# → CLI prints ROLLBACK SAFETY WARNING (HTTP 409); current deploy unchanged
+# → cairn events shows RollbackBlocked
+
+# Only if you accept the risk:
+cairn rollback counter-api --to <older_deploy_id> --force
+# → RollbackForced event, then a new rollback deploy
+```
+
+**Honest scope:** “unsafe” means intervening **migration** deploys, not every volume write. Pre-deploy volume backup still runs (and fails the deploy) when `migration:` is set.
+
+Live script (needs Mini-Docker + `cairnd`):
+
+```bash
+./scripts/rollback_safety_demo.sh          # block path
+FORCE=1 ./scripts/rollback_safety_demo.sh  # also force path
+```
+
+---
+
 ## 📊 Step 6: View Dashboard
 
 You can access the embedded web dashboard:

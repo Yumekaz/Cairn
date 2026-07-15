@@ -1,0 +1,21 @@
+# Fast migration deploy for rollback-safety demos (sets StateTouched=true on success).
+name: counter-api
+kind: web
+image: ${CAIRN_ROOTFS}
+command: ["/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"]
+migration: "true"
+ports:
+  - host: 8080
+    container: 80
+volumes:
+  - name: counter-data
+    mount_path: /www
+healthcheck:
+  http_path: /index.html
+  interval: 2s
+  timeout: 1s
+  retries: 3
+  startup_grace: 1s
+restart:
+  policy: on-failure
+  max_retries: 3

@@ -10,6 +10,7 @@ Audit events are stored in SQLite and listed via `cairn events` / `cairn events 
 | `ServiceCreated` | First deploy of a new service name |
 | `ServiceStarted` / `ServiceStopped` / `ServiceRestarted` / `ServiceRemoved` | Service actions; **reconcile** auto-recover also emits `ServiceRestarted` (`container_stopped` / `container_missing`). Crash-loop (default 5 auto-restarts in 10m, process-local) sets desired=stopped and emits `ServiceStopped` with a crash-loop message. Manual `cairn start` / `restart` resets the counter. |
 | `DeployStarted` / `DeploySucceeded` / `DeployCompleted` / `DeployFailed` | Deploy workflow |
+| `RollbackBlocked` / `RollbackForced` | Unsafe rollback across intervening `state_touched` (migration) deploys; force bypass |
 | `RuntimeCreateStarted` / `RuntimeCreateCompleted` | Candidate container create |
 | `HealthCheckPassed` / `HealthCheckFailed` | Deploy health step |
 | `RouteUpdated` | Successful promote / traffic shift |
@@ -25,6 +26,15 @@ Audit events are stored in SQLite and listed via `cairn events` / `cairn events 
 | `DeployCompleted` | Also emitted after `DeploySucceeded` |
 | `BackupCompleted` | Also emitted after `BackupSucceeded` |
 | `RestoreCompleted` | Emitted with `BackupRestored` on success |
+
+## Rollback safety policy
+
+Unsafe = intervening **successful** deploys with `state_touched=true` (set after a successful **migration** step), not arbitrary volume writes.
+
+- Without `--force`: HTTP 409 + CLI warning + `RollbackBlocked` event; `current_deploy_id` unchanged.
+- With `--force`: `RollbackForced` then normal rollback deploy workflow.
+
+Scripted proof: `./scripts/rollback_safety_demo.sh` (optional `FORCE=1`).
 
 ## Deferred / not emitted as separate types yet
 

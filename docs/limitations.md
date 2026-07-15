@@ -31,3 +31,6 @@ For stateful databases and volume mounts, scaling replicas automatically causes 
 
 ### 6. SQLite Concurrency Scale
 Cairn uses a local SQLite database (`cairn.db`) to record metadata and workflows. While SQLite is fast, lightweight, and single-file, it is not optimized for thousands of simultaneous high-frequency concurrent writes. For standard developer/homelab PaaS use cases, it is extremely robust.
+
+### 7. Rollback safety is migration-scoped
+`cairn rollback` blocks (unless `--force`) only when intervening successful deploys have `state_touched=true`, which is set after a successful **`migration:`** step. Ordinary volume writes alone do not mark state-touched. See [quickstart](quickstart.md#rollback-safety-stateful-deploys) and [events](events.md).

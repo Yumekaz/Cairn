@@ -22,6 +22,10 @@ const (
 	DeployCompleted EventType = "DeployCompleted"
 	DeployFailed    EventType = "DeployFailed"
 
+	// Rollback safety (Phase 19 Track C) — blocked without --force when StateTouched
+	RollbackBlocked EventType = "RollbackBlocked"
+	RollbackForced  EventType = "RollbackForced"
+
 	// Runtime / health / routing (MLP §17)
 	RuntimeCreateStarted   EventType = "RuntimeCreateStarted"
 	RuntimeCreateCompleted EventType = "RuntimeCreateCompleted"
@@ -62,6 +66,7 @@ func ImplementedTypes() []EventType {
 		DaemonStarted, DaemonStopped,
 		ServiceCreated, ServiceStarted, ServiceStopped, ServiceRestarted, ServiceRemoved,
 		DeployStarted, DeploySucceeded, DeployCompleted, DeployFailed,
+		RollbackBlocked, RollbackForced,
 		RuntimeCreateStarted, RuntimeCreateCompleted,
 		HealthCheckPassed, HealthCheckFailed,
 		RouteUpdated, RoutePreserved,
