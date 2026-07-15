@@ -4,7 +4,7 @@ This document outlines upcoming phases and **honest status** for reliability wor
 
 ---
 
-## 📡 Phase 19: Single-node operational maturity (in progress)
+## 📡 Phase 19: Single-node operational maturity (**done**)
 
 **Goal**: Honest ops depth — complete event story, crash-loop visibility, rollback safety. **Not** multi-node (Phase 18).
 
@@ -13,9 +13,12 @@ This document outlines upcoming phases and **honest status** for reliability wor
 | A | Event taxonomy (MLP §17) | **Done** — full deploy/health/route/backup/restore story + `clean_demo` asserts |
 | B | Continuous health / crash-loop | **Done** — reconcile emits `ServiceRestarted`; crash-loop stop thrash (5/10m); F4 asserts event |
 | C | Rollback safety / state-touched | **Done** — `RollbackBlocked`/`RollbackForced` events + unit tests + `scripts/rollback_safety_demo.sh` |
-| D | Demo hygiene | Pending |
+| D | Demo hygiene | **Done** — portable FailForge bootstrap paths, `demo_reset.sh`, gate/docs list Phase 19 proofs |
 
-See session plan *Phase 19 — Single-node operational maturity*. Event reference: [events.md](events.md).
+**Proof scripts:** `clean_demo.sh` (events), `failure_matrix.sh` (F4 restart events), `rollback_safety_demo.sh`, `demo_reset.sh`, `stability_gate.sh` (`RUN_ROLLBACK_DEMO=1` optional).  
+**Unit always:** `N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh`. Live Mini-Docker demos need local Linux + root networking.
+
+Event reference: [events.md](events.md).
 
 ---
 
@@ -77,9 +80,11 @@ CASE=F2 ./scripts/failure_matrix.sh      # one case
 ## Proof gate (daily)
 
 ```bash
-N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh   # faster
-N=1 ./scripts/stability_gate.sh                     # full cold clone + mid-deploy
+N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh         # unit + bash -n (no Mini-Docker)
+N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh   # + clean_demo + mid-deploy
+RUN_ROLLBACK_DEMO=1 N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh
 CASE=F1,F2,F3,F4 ./scripts/failure_matrix.sh
+./scripts/demo_reset.sh                             # optional cleanup before demos
 ```
 
 GitHub Actions (`smoke.yml`) runs **unit + build + bash -n only**. Full gate is local Linux + Mini-Docker.

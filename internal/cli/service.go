@@ -137,10 +137,28 @@ var restartCmd = &cobra.Command{
 	},
 }
 
+var rmCmd = &cobra.Command{
+	Use:   "rm [service_name]",
+	Short: "Remove a service and its runtime container",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+		client := NewDaemonClient(SocketPath)
+		ctx := context.Background()
+		path := fmt.Sprintf("/services/%s", name)
+		if err := client.Delete(ctx, path, nil); err != nil {
+			return err
+		}
+		fmt.Printf("Service '%s' removed.\n", name)
+		return nil
+	},
+}
+
 func init() {
 	RootCmd.AddCommand(psCmd)
 	RootCmd.AddCommand(inspectCmd)
 	RootCmd.AddCommand(startCmd)
 	RootCmd.AddCommand(stopCmd)
 	RootCmd.AddCommand(restartCmd)
+	RootCmd.AddCommand(rmCmd)
 }

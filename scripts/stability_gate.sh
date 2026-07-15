@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# Cairn local stability gate (Phase A).
+# Cairn local stability gate (Phase 17/19 proof loop).
 # Full demos need Linux + Mini-Docker. CI only runs unit/build via smoke.yml.
 #
 # Usage:
 #   ./scripts/stability_gate.sh
 #   N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh   # faster local loop
+#   N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh         # unit + bash -n only
 #   N=5 ./scripts/stability_gate.sh                     # release-ish
 #
 # Env:
-#   N                 times to run each live demo (default 1)
-#   SKIP_UNIT=1       skip go test
-#   SKIP_COLD_CLONE=1 skip cold_clone_verify (use clean_demo instead if SKIP_CLEAN_DEMO!=1)
-#   SKIP_CLEAN_DEMO=1 skip clean_demo
-#   SKIP_MID_DEPLOY=1 skip mid_deploy_crash_demo
-#   SKIP_LIVE=1       skip all live Mini-Docker demos
-#   LOG_DIR           default: /tmp/cairn-proof-runs
+#   N                   times to run each live demo (default 1)
+#   SKIP_UNIT=1         skip go test
+#   SKIP_COLD_CLONE=1   skip cold_clone_verify (use clean_demo instead if SKIP_CLEAN_DEMO!=1)
+#   SKIP_CLEAN_DEMO=1   skip clean_demo
+#   SKIP_MID_DEPLOY=1   skip mid_deploy_crash_demo
+#   RUN_ROLLBACK_DEMO=1 also run scripts/rollback_safety_demo.sh (needs healthy Mini-Docker)
+#   SKIP_LIVE=1         skip all live Mini-Docker demos
+#   LOG_DIR             default: /tmp/cairn-proof-runs
 
 set -euo pipefail
 
@@ -100,6 +102,13 @@ for i in $(seq 1 "$N"); do
       sleep 1
     fi
     run_step "mid_deploy_crash_demo ($i)" bash scripts/mid_deploy_crash_demo.sh
+  fi
+  if [[ "${RUN_ROLLBACK_DEMO:-0}" == "1" ]]; then
+    if ! cairn status >/dev/null 2>&1; then
+      nohup cairnd >>"$LOG" 2>&1 &
+      sleep 1
+    fi
+    run_step "rollback_safety_demo ($i)" bash scripts/rollback_safety_demo.sh
   fi
 done
 

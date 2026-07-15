@@ -10,7 +10,8 @@ system:
   type: process_cluster
   nodes:
     count: 2
-    command: "/home/yumekaz/Desktop/SERVER/tests/failure/failforge_bootstrap.sh {node_id} {port} .failforge/data/{run_id}/{node_id}"
+    # Prefer relative bootstrap from Cairn repo (or set CAIRN_ROOT / absolute path when launching FailForge)
+    command: "tests/failure/failforge_bootstrap.sh {node_id} {port} .failforge/data/{run_id}/{node_id}"
     ports:
       start: 2476
     data_dir: ".failforge/data/{run_id}/{node_id}"

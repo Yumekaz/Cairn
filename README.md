@@ -41,7 +41,14 @@ KILL_SIGNAL=SIGKILL ./scripts/mid_deploy_crash_demo.sh
 ./scripts/failure_matrix.sh
 ```
 
-Also useful: `./scripts/clean_demo.sh` (deploy / restart / backup / broken-deploy / restore / dashboard).
+Also useful:
+
+```bash
+./scripts/clean_demo.sh              # deploy / backup / broken-deploy / restore / event story
+./scripts/rollback_safety_demo.sh    # migration StateTouched → RollbackBlocked
+./scripts/demo_reset.sh              # drop leftover demo services
+N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh   # unit + script syntax only
+```
 
 GitHub Actions runs **unit + build only**. Full gate needs local Mini-Docker.
 

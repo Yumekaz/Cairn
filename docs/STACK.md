@@ -108,7 +108,16 @@ KILL_SIGNAL=SIGKILL ./scripts/mid_deploy_crash_demo.sh
 ./scripts/failure_matrix.sh
 ```
 
-Also: `./scripts/clean_demo.sh` (deploy / restart / backup / broken-deploy / restore / dashboard).
+Also: `./scripts/clean_demo.sh` (deploy / restart / backup / broken-deploy / restore / dashboard / event story).
+
+Phase 19 single-node ops (events, crash-loop, rollback safety):
+
+```bash
+./scripts/demo_reset.sh                      # optional: drop leftover demo services
+./scripts/rollback_safety_demo.sh            # StateTouched blocks rollback
+FORCE=1 ./scripts/rollback_safety_demo.sh    # also force path
+N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh  # unit + bash -n without Mini-Docker
+```
 
 ### Track B — FailForge MiniDB (seed 42)
 
