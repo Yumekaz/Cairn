@@ -206,6 +206,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 	var svc *api.Service
 	var previousRuntimeID string
+	isNewService := existing == nil
 	if existing != nil {
 		svc = existing
 		previousRuntimeID = svc.RuntimeID
@@ -241,6 +242,14 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.UpsertService(svc); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if isNewService {
+		_ = s.store.CreateEvent(&api.Event{
+			ID:        uuid.New().String(),
+			ServiceID: &svc.ID,
+			Type:      events.ServiceCreated.String(),
+			Message:   fmt.Sprintf("Service %s registered", svc.Name),
+		})
 	}
 
 	if err := s.store.CreateDeploy(deploy); err != nil {
@@ -278,6 +287,20 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 				s.error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			_ = s.store.CreateEvent(&api.Event{
+				ID:        uuid.New().String(),
+				ServiceID: &svc.ID,
+				VolumeID:  &vol.ID,
+				Type:      events.VolumeCreated.String(),
+				Message:   fmt.Sprintf("Volume %s created", vol.Name),
+			})
+			_ = s.store.CreateEvent(&api.Event{
+				ID:        uuid.New().String(),
+				ServiceID: &svc.ID,
+				VolumeID:  &vol.ID,
+				Type:      events.VolumeAttached.String(),
+				Message:   fmt.Sprintf("Volume %s attached to service %s at %s", vol.Name, svc.Name, vol.MountPath),
+			})
 		} else {
 			existingVol.AttachedServiceID = svc.ID
 			existingVol.MountPath = volConfig.MountPath
@@ -286,6 +309,13 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 				s.error(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			_ = s.store.CreateEvent(&api.Event{
+				ID:        uuid.New().String(),
+				ServiceID: &svc.ID,
+				VolumeID:  &existingVol.ID,
+				Type:      events.VolumeAttached.String(),
+				Message:   fmt.Sprintf("Volume %s re-attached to service %s at %s", existingVol.Name, svc.Name, existingVol.MountPath),
+			})
 		}
 	}
 
@@ -535,6 +565,13 @@ func (s *Server) performVolumeBackup(vol *api.Volume) (*api.Backup, error) {
 		BackupID: &b.ID,
 		Type:     events.BackupSucceeded.String(),
 		Message:  fmt.Sprintf("Backup completed successfully for volume %s (Size: %d bytes)", vol.Name, sizeBytes),
+	})
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &b.ID,
+		Type:     events.BackupCompleted.String(),
+		Message:  fmt.Sprintf("Backup completed for volume %s (Size: %d bytes)", vol.Name, sizeBytes),
 	})
 
 	return b, nil
@@ -935,6 +972,17 @@ func (s *Server) failDeploy(deploy *api.Deploy, svc *api.Service, reason string)
 	svc.CurrentDeployID = restored
 	_ = s.store.UpsertService(svc)
 
+	preserved := restored
+	if preserved == "" {
+		preserved = "(none — no prior successful deploy)"
+	}
+	s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		DeployID:  &deploy.ID,
+		Type:      events.RoutePreserved.String(),
+		Message:   fmt.Sprintf("Route preserved on failed deploy; current_deploy_id=%s", preserved),
+	})
 	s.store.CreateEvent(&api.Event{
 		ID:        uuid.New().String(),
 		ServiceID: &svc.ID,

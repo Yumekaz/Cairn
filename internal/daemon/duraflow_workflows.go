@@ -343,11 +343,28 @@ func (s *Server) execDeployCreateContainer(ctx *duraflow.StepContext) error {
 	candidateName := fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
 	cfg.Environment = s.resolveEnvPlaceholders(ctx.Context, s.mergeDatabaseEnvs(svc.ID, cfg.Environment))
 
+	depID := deploy.ID
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		DeployID:  &depID,
+		Type:      events.RuntimeCreateStarted.String(),
+		Message:   fmt.Sprintf("Creating runtime candidate %s for service %s", candidateName, svc.Name),
+	})
+
 	candidateID, err := s.runtime.CreateContainer(ctx.Context, cfg, candidateName)
 	if err != nil {
 		s.failDeployUnlessInterrupted(deploy, svc, "Failed to create container: "+err.Error(), err)
 		return err
 	}
+
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &svc.ID,
+		DeployID:  &depID,
+		Type:      events.RuntimeCreateCompleted.String(),
+		Message:   fmt.Sprintf("Runtime candidate created: %s (id %s)", candidateName, candidateID),
+	})
 
 	ctx.State["candidate_id"] = candidateID
 	return nil
@@ -417,6 +434,7 @@ func (s *Server) execDeployRunHealthCheck(ctx *duraflow.StepContext) error {
 			s.failDeployUnlessInterrupted(deploy, svc, "Failed to inspect container: "+err.Error(), err)
 			return err
 		}
+		depID := deploy.ID
 		if err := RunHealthCheck(ctx.Context, cfg.HealthCheck, info.IPAddress, cfg.Ports[0].Container); err != nil {
 			if isWorkflowInterrupted(err) {
 				return err
@@ -424,9 +442,23 @@ func (s *Server) execDeployRunHealthCheck(ctx *duraflow.StepContext) error {
 			logs := s.getContainerLogs(ctx.Context, candidateID)
 			s.runtime.StopContainer(ctx.Context, candidateID)
 			s.runtime.RemoveContainer(ctx.Context, candidateID)
+			_ = s.store.CreateEvent(&api.Event{
+				ID:        uuid.New().String(),
+				ServiceID: &svc.ID,
+				DeployID:  &depID,
+				Type:      events.HealthCheckFailed.String(),
+				Message:   fmt.Sprintf("Health check failed for %s: %s", svc.Name, err.Error()),
+			})
 			s.failDeploy(deploy, svc, fmt.Sprintf("Health check failed: %s. Logs:\n%s", err.Error(), logs))
 			return fmt.Errorf("container health checks failed: %w", err)
 		}
+		_ = s.store.CreateEvent(&api.Event{
+			ID:        uuid.New().String(),
+			ServiceID: &svc.ID,
+			DeployID:  &depID,
+			Type:      events.HealthCheckPassed.String(),
+			Message:   fmt.Sprintf("Health check passed for candidate of service %s", svc.Name),
+		})
 	}
 	return nil
 }
@@ -551,8 +583,29 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 		ID:        uuid.New().String(),
 		ServiceID: &dbSvc.ID,
 		DeployID:  &depID,
+		Type:      events.RouteUpdated.String(),
+		Message:   fmt.Sprintf("Route updated for %s → %s", dbSvc.Name, dbSvc.Route),
+	})
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &dbSvc.ID,
+		DeployID:  &depID,
 		Type:      events.DeploySucceeded.String(),
 		Message:   fmt.Sprintf("Successfully deployed service %s (container: %s)", dbSvc.Name, candidateName),
+	})
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &dbSvc.ID,
+		DeployID:  &depID,
+		Type:      events.DeployCompleted.String(),
+		Message:   fmt.Sprintf("Deploy completed for service %s", dbSvc.Name),
+	})
+	_ = s.store.CreateEvent(&api.Event{
+		ID:        uuid.New().String(),
+		ServiceID: &dbSvc.ID,
+		DeployID:  &depID,
+		Type:      events.ServiceStarted.String(),
+		Message:   fmt.Sprintf("Service %s is running (runtime %s)", dbSvc.Name, candidateName),
 	})
 	return nil
 }
@@ -671,6 +724,13 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 		Type:     events.BackupSucceeded.String(),
 		Message:  fmt.Sprintf("Successfully completed backup for volume %s (ID: %s)", vol.Name, b.ID),
 	})
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &b.ID,
+		Type:     events.BackupCompleted.String(),
+		Message:  fmt.Sprintf("Backup completed for volume %s (ID: %s)", vol.Name, b.ID),
+	})
 
 	return nil
 }
@@ -703,7 +763,7 @@ func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 		ID:       uuid.New().String(),
 		VolumeID: &vol.ID,
 		BackupID: &backup.ID,
-		Type:     events.BackupStarted.String(),
+		Type:     events.RestoreStarted.String(),
 		Message:  fmt.Sprintf("Restoring volume %s from backup %s", vol.Name, backup.ID),
 	})
 
@@ -799,6 +859,13 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 			Type:     events.BackupRestored.String(),
 			Message:  fmt.Sprintf("Successfully restored volume %s from backup %s", vol.Name, backup.ID),
 		})
+		s.store.CreateEvent(&api.Event{
+			ID:       uuid.New().String(),
+			VolumeID: &vol.ID,
+			BackupID: &backup.ID,
+			Type:     events.RestoreCompleted.String(),
+			Message:  fmt.Sprintf("Restore completed for volume %s", vol.Name),
+		})
 		return nil
 	}
 
@@ -893,6 +960,13 @@ func (s *Server) execRestoreStartContainer(ctx *duraflow.StepContext) error {
 		BackupID: &backup.ID,
 		Type:     events.BackupRestored.String(),
 		Message:  fmt.Sprintf("Successfully restored volume %s from backup %s", vol.Name, backup.ID),
+	})
+	s.store.CreateEvent(&api.Event{
+		ID:       uuid.New().String(),
+		VolumeID: &vol.ID,
+		BackupID: &backup.ID,
+		Type:     events.RestoreCompleted.String(),
+		Message:  fmt.Sprintf("Restore completed for volume %s", vol.Name),
 	})
 	return nil
 }

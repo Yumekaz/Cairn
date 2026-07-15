@@ -4,6 +4,21 @@ This document outlines upcoming phases and **honest status** for reliability wor
 
 ---
 
+## 📡 Phase 19: Single-node operational maturity (in progress)
+
+**Goal**: Honest ops depth — complete event story, crash-loop visibility, rollback safety. **Not** multi-node (Phase 18).
+
+| Track | Focus | Status |
+| --- | --- | --- |
+| A | Event taxonomy (MLP §17) | **Done** — full deploy/health/route/backup/restore story + `clean_demo` asserts |
+| B | Continuous health / crash-loop | Pending |
+| C | Rollback safety / state-touched | Pending |
+| D | Demo hygiene | Pending |
+
+See session plan *Phase 19 — Single-node operational maturity*. Event reference: [events.md](events.md).
+
+---
+
 ## 🔬 Phase 17: Failure testing (single-node)
 
 **Goal**: Systematic failure testing to validate platform correctness — **not** multi-node chaos.

@@ -230,6 +230,29 @@ DASH_HTML="$(curl -sf -m 5 -L http://127.0.0.1:2476/dashboard/ | head -c 4000)"
 echo "$DASH_HTML" | grep -qi 'Cairn' || die "dashboard missing Cairn title/content"
 LOG "dashboard: OK"
 
+LOG "Event story (MLP §17 subset)"
+# Global timeline (backup/restore attach volume_id, not service_id)
+EVENTS_OUT="$(cairn events 2>/dev/null || true)"
+echo "$EVENTS_OUT" | head -50
+# Explicit checks (die if missing) — full counter-api cycle + broken deploy
+for need in \
+  DeployStarted RuntimeCreateStarted RuntimeCreateCompleted \
+  HealthCheckPassed RouteUpdated DeploySucceeded \
+  DeployFailed RoutePreserved \
+  BackupStarted BackupSucceeded \
+  RestoreStarted; do
+  echo "$EVENTS_OUT" | grep -q "$need" || die "missing event type in timeline: $need"
+done
+echo "$EVENTS_OUT" | grep -qE 'RestoreCompleted|BackupRestored' || die "missing restore completion event"
+# Optional MLP aliases (emitted alongside canonical names)
+if echo "$EVENTS_OUT" | grep -q DeployCompleted; then
+  LOG "alias DeployCompleted: present"
+fi
+if echo "$EVENTS_OUT" | grep -q BackupCompleted; then
+  LOG "alias BackupCompleted: present"
+fi
+LOG "event story: OK"
+
 LOG ""
 LOG "=== CLEAN DEMO PASSED ==="
 LOG "Dashboard: http://127.0.0.1:2476/dashboard/"
