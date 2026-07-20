@@ -637,16 +637,56 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 
 	backupPath := filepath.Join(backupDir, input.BackupID+".tar.gz")
 
-	b := &api.Backup{
-		ID:         input.BackupID,
-		VolumeID:   vol.ID,
-		BackupPath: backupPath,
-		Status:     "pending",
-		CreatedAt:  time.Now(),
+	// Re-entrant after crash-resume or failIncompleteBackupsOnStartup: never leave
+	// a duplicate-key failure that strands a non-terminal backup row.
+	existing, err := s.store.GetBackup(input.BackupID)
+	if err != nil {
+		return fmt.Errorf("failed to look up backup record: %w", err)
 	}
-
-	if err := s.store.CreateBackup(b); err != nil {
-		return fmt.Errorf("failed to create backup record: %w", err)
+	var b *api.Backup
+	if existing != nil {
+		if existing.Status == "success" {
+			// Already durable; treat as idempotent success (DuraFlow step retry).
+			return nil
+		}
+		b = existing
+		b.BackupPath = backupPath
+		b.Status = "pending"
+		b.FailureReason = ""
+		b.Checksum = ""
+		b.SizeBytes = 0
+		b.CompletedAt = nil
+		if err := s.store.UpdateBackup(b); err != nil {
+			return fmt.Errorf("failed to reset backup record for retry: %w", err)
+		}
+	} else {
+		b = &api.Backup{
+			ID:         input.BackupID,
+			VolumeID:   vol.ID,
+			BackupPath: backupPath,
+			Status:     "pending",
+			CreatedAt:  time.Now(),
+		}
+		if err := s.store.CreateBackup(b); err != nil {
+			// Race: another path inserted the row; re-read and continue if pending/failed.
+			existing, getErr := s.store.GetBackup(input.BackupID)
+			if getErr != nil || existing == nil {
+				return fmt.Errorf("failed to create backup record: %w", err)
+			}
+			if existing.Status == "success" {
+				return nil
+			}
+			b = existing
+			b.BackupPath = backupPath
+			b.Status = "pending"
+			b.FailureReason = ""
+			b.Checksum = ""
+			b.SizeBytes = 0
+			b.CompletedAt = nil
+			if err := s.store.UpdateBackup(b); err != nil {
+				return fmt.Errorf("failed to reset backup record: %w", err)
+			}
+		}
 	}
 
 	s.store.CreateEvent(&api.Event{
@@ -698,6 +738,8 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 	if err != nil {
 		b.Status = "failed"
 		b.FailureReason = err.Error()
+		timeNow := time.Now()
+		b.CompletedAt = &timeNow
 		s.store.UpdateBackup(b)
 
 		s.store.CreateEvent(&api.Event{

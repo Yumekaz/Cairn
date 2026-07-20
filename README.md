@@ -1,56 +1,44 @@
 # 🏔️ Cairn
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.26.x-blue.svg)](https://golang.org)
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 
-Cairn is a CLI-first, single-node Platform-as-a-Service (PaaS) built for orchestrating containerized backends, database engines, and scheduled tasks on Linux. Designed as a self-hosted alternative to modern cloud platforms, Cairn features zero-downtime rollouts, hardware-secured secrets, automated database persistence operations, and a resilient workflow execution engine.
+Cairn is a CLI-first, **single-node** Linux PaaS: deploy stateful services on **Mini-Docker**, durable deploys via **DuraFlow**, volumes/backups, reverse proxy, and a recoverability story when `cairnd` dies mid-deploy.
 
-Cairn sits cleanly above container runtimes (such as **Mini-Docker**) through an adapter abstraction layer, managing system states, routing topologies, and data lifecycles.
-
-### Stack story (portfolio map)
-
-Cairn is the control plane of a six-project stack: **Cairn → Mini-Docker → DuraFlow**, with **FailForge** testing **MiniDB** and **Coordination-service**. For the architecture diagram, repo map, postmortem proof table, and cold-cloneable demo commands, see **[docs/STACK.md](docs/STACK.md)**.
+Not multi-node. Not a cloud clone. Spine = **Cairn + Mini-Docker + DuraFlow**. Lab projects (FailForge / MiniDB / Coordination) are portfolio-adjacent — see **[docs/STACK.md](docs/STACK.md)**.
 
 ---
 
-## Reliability claim (what this repo proves)
+## Reliability claim (single-node MLP)
 
-**Single-node Cairn deploys stateful services on Mini-Docker and recovers correctly if you kill `cairnd` mid-deploy** — DuraFlow resumes work, failed candidates do not steal `current_deploy_id`, and traffic keeps serving from a healthy release.
+**On one Linux host, Cairn deploys a stateful service on Mini-Docker, keeps a healthy release serving if a candidate fails or `cairnd` is killed mid-deploy, and you can re-run that proof locally.**
 
-### Re-run the proofs yourself
+DuraFlow resumes unfinished work; failed candidates do not steal `current_deploy_id`; traffic stays on the last healthy release.
 
-Sibling checkouts of **Cairn**, **DURAFLOW**, and **Mini-Docker** are required (see Quickstart). Mini-Docker daemon must be running.
+### Prove it (one command)
+
+Sibling checkouts of **Cairn**, **DURAFLOW**, and **Mini-Docker** are required. Live proofs need **privileged Mini-Docker** (sudo/root for daemon + networking). Set env (or let `scripts/lib/runtime.sh` discover rootfs):
 
 ```bash
-export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"   # or your rootfs path
+export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
 export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
 export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
 
-# One command (unit + crash recovery + optional cold clone)
-N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh
-
-# Private cold clone: wipe → clone three repos → build → clean_demo
-./scripts/cold_clone_verify.sh
-
-# Mid-deploy kill: baseline → slow migration → SIGTERM/SIGKILL cairnd → restart → heal
-./scripts/mid_deploy_crash_demo.sh
-KILL_SIGNAL=SIGKILL ./scripts/mid_deploy_crash_demo.sh
-
-# Failure matrix F1–F4,F6 (see docs/roadmap.md Phase 17)
-./scripts/failure_matrix.sh
+# Closeout A — single-node MLP proof (primary)
+./scripts/prove_mlp.sh
+# or: make prove
 ```
 
-Also useful:
+That runs units + clean deploy story + mid-deploy crash + rollback safety + failure matrix F1–F6 (including hard F5 backup interrupt).  
+Other scripts: `clean_demo.sh`, `failure_matrix.sh`, `stability_gate.sh`, `cold_clone_verify.sh`, `prove_portability.sh`, `demo_reset.sh`.  
+Unit/syntax only (no Mini-Docker): `N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh` or `make smoke`.  
+Same-machine Portability A proof (clean `/tmp` sibling tree, no Desktop): `./scripts/prove_portability.sh` — see [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md).
 
-```bash
-./scripts/clean_demo.sh              # deploy / backup / broken-deploy / restore / event story
-./scripts/rollback_safety_demo.sh    # migration StateTouched → RollbackBlocked
-./scripts/demo_reset.sh              # drop leftover demo services
-N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh   # unit + script syntax only
-```
+### What GitHub Actions runs
 
-GitHub Actions runs **unit + build only**. Full gate needs local Mini-Docker.
+**Unit tests + binary build + `bash -n` on `scripts/*.sh` only** (`.github/workflows/smoke.yml`).  
+Full proofs need **local Linux + privileged Mini-Docker + DURAFLOW sibling**. FailForge continuous CI is **out of Closeout A** (optional lab only).
 
 ### Postmortems
 
@@ -59,7 +47,7 @@ GitHub Actions runs **unit + build only**. Full gate needs local Mini-Docker.
 | Failed deploy left wrong `current_deploy_id` | [docs/postmortems/2026-07-failed-deploy-metadata.md](docs/postmortems/2026-07-failed-deploy-metadata.md) |
 | Mid-deploy `cairnd` kill + recovery | [docs/postmortems/2026-07-mid-deploy-crash-recovery.md](docs/postmortems/2026-07-mid-deploy-crash-recovery.md) |
 
-Stability note: cold_clone + mid_deploy were **5/5 green** locally after heal/restart fixes; run `./scripts/stability_gate.sh` to re-verify.
+Closeout criteria: [docs/CLOSEOUT_A.md](docs/CLOSEOUT_A.md) · Portability A (sibling layout, no Desktop hard req): [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md) · [docs/roadmap.md](docs/roadmap.md).
 
 ---
 
@@ -133,7 +121,7 @@ parent/
   Mini-Docker/    # git clone git@github.com:Yumekaz/Mini-Docker.git
 ```
 
-Go `v1.22+`, Python `v3.10+`, OverlayFS. Mini-Docker daemon needs root (or carefully configured rootless).
+Go `1.26.x` (see `go.mod`), Python `3.10+`, OverlayFS. Mini-Docker daemon needs root (or carefully configured rootless).
 
 ### 1. Clone siblings + install
 ```bash
@@ -167,14 +155,14 @@ cairn doctor
 ./scripts/clean_demo.sh
 ```
 
-### Private cold-clone self-check (no friends required)
+### Private cold-clone / portability self-check (no friends required)
 From a Cairn checkout you already trust:
 ```bash
-./scripts/cold_clone_verify.sh
-# writes ~/Desktop/cold-clone-check/ and runs clean_demo from fresh clones
+./scripts/prove_portability.sh   # Portability A: clean tree under /tmp, no Desktop
+./scripts/cold_clone_verify.sh   # optional: fresh git clones + clean_demo
 ```
 
-See [docs/quickstart.md](docs/quickstart.md) and [docs/postmortems/](docs/postmortems/).
+See [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md), [docs/quickstart.md](docs/quickstart.md), and [docs/postmortems/](docs/postmortems/).
 
 ---
 

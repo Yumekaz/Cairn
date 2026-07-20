@@ -15,19 +15,14 @@ KILL_SIGNAL="${KILL_SIGNAL:-SIGTERM}"
 log() { echo "[crash-demo] $*"; }
 die() { echo "[crash-demo] ERROR: $*" >&2; exit 1; }
 
-if [[ -z "${CAIRN_ROOTFS:-}" ]]; then
-  for cand in "${ROOT}/../Mini-Docker/rootfs" "${HOME}/Desktop/Mini-Docker/rootfs"; do
-    if [[ -x "${cand}/bin/busybox" ]]; then
-      export CAIRN_ROOTFS="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
-      break
-    fi
-  done
-fi
+# Shared Mini-Docker / cairnd bootstrap
+# shellcheck source=lib/runtime.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime.sh"
+cairn_runtime_discover
 [[ -n "${CAIRN_ROOTFS:-}" ]] || die "set CAIRN_ROOTFS"
-
-if ! cairn doctor >/dev/null 2>&1; then
-  die "cairn doctor failed — start Mini-Docker and cairnd first (or run clean_demo once)"
-fi
+ensure_minidocker
+ensure_cairnd
+wait_doctor 30
 
 # Ensure volume seed
 mkdir -p "${HOME}/.cairn/volumes/counter-data"
@@ -39,7 +34,12 @@ cairn deploy "${ROOT}/examples/counter-api/cairn.yaml" >/dev/null
 BASELINE="$(cairn inspect counter-api | awk -F': *' '/^Current Deploy ID:/{print $2}' | tr -d '[:space:]')"
 [[ -n "$BASELINE" ]] || die "no baseline Current Deploy ID"
 log "baseline Current Deploy ID=$BASELINE"
-curl -sf -m 3 http://127.0.0.1:8080/index.html | grep -q CRASH_DEMO_OK
+# Avoid pipefail+grep -q SIGPIPE false negatives (exit 141 when match found)
+BODY="$(curl -sf -m 3 http://127.0.0.1:8080/index.html || true)"
+case "$BODY" in
+  *CRASH_DEMO_OK*) ;;
+  *) die "baseline not serving CRASH_DEMO_OK (got: ${BODY:0:80})" ;;
+esac
 
 # Start slow migration deploy in background
 SLOW="${ROOT}/examples/counter-api/cairn_slow_migration.yaml"
@@ -141,7 +141,11 @@ done
 [[ -n "$SUCCESS" ]] || die "timeout waiting for recovery (inspect: $(cairn inspect counter-api 2>&1 | tr '\n' ' '))"
 
 # Traffic must work
-curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q CRASH_DEMO_OK || die "service not serving after recovery"
+BODY_AFTER="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+case "$BODY_AFTER" in
+  *CRASH_DEMO_OK*) ;;
+  *) die "service not serving after recovery (got: ${BODY_AFTER:0:80})" ;;
+esac
 
 # counter-api only: no pending deploys; current is success; baseline not corrupted.
 # Accept either: (a) resumed deploy promoted to current, or (b) failed clean, baseline current.

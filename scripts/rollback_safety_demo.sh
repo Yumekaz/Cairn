@@ -12,28 +12,13 @@ die() { echo "[rollback-demo] ERROR: $*" >&2; exit 1; }
 command -v cairn >/dev/null || die "cairn not on PATH (build bin/ first)"
 command -v cairnd >/dev/null || die "cairnd not on PATH"
 
-# Reuse clean_demo env discovery for Mini-Docker / rootfs
-if [[ -z "${CAIRN_ROOTFS:-}" ]]; then
-  for cand in \
-    "${ROOT}/../Mini-Docker/rootfs" \
-    "${HOME}/Desktop/Mini-Docker/rootfs"; do
-    if [[ -x "${cand}/bin/busybox" || -x "${cand}/bin/sh" ]]; then
-      export CAIRN_ROOTFS="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
-      break
-    fi
-  done
-fi
+# Shared Mini-Docker / cairnd bootstrap (starts if needed)
+# shellcheck source=lib/runtime.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime.sh"
+cairn_runtime_discover
 [[ -n "${CAIRN_ROOTFS:-}" && -d "$CAIRN_ROOTFS" ]] || die "Set CAIRN_ROOTFS"
-
-if [[ -z "${MINI_DOCKER_SOCKET:-}" ]]; then
-  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-    export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR}/mini-docker/mini-docker.sock"
-  else
-    export MINI_DOCKER_SOCKET="/run/user/$(id -u)/mini-docker/mini-docker.sock"
-  fi
-fi
-
-cairn status >/dev/null 2>&1 || die "cairnd not running (start Mini-Docker + cairnd first, e.g. via clean_demo)"
+ensure_minidocker
+ensure_cairnd
 
 # Unique service name to avoid clobbering counter-api demos if desired.
 # Default reuses counter-api for a simple path; set RB_SERVICE to override.

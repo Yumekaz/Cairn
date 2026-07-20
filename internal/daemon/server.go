@@ -126,6 +126,11 @@ func (s *Server) Start(ctx context.Context) error {
 	sched := NewScheduler(s.store, s.runtime, s.config.DataDir)
 	go sched.Start(ctx)
 
+	// Fail incomplete volume backups before the DuraFlow worker resumes runs.
+	// Mid-flight SIGKILL leaves status=pending and a partial archive; those must
+	// never be treated as success after recovery.
+	s.failIncompleteBackupsOnStartup()
+
 	// Start background DuraFlow worker daemon (polls incomplete runs / reclaims leases
 	// after the previous process was killed mid-step).
 	if err := s.dfWorker.Start(); err != nil {
@@ -639,6 +644,45 @@ func (s *Server) promoteServiceAfterHealedDeploy(w *api.Workflow) {
 	svc.ActualState = "running"
 	_ = s.store.UpsertService(svc)
 	log.Printf("cairnd: recovery: promoted service %s to deploy %s after heal", svc.Name, d.ID)
+}
+
+// failIncompleteBackupsOnStartup marks non-terminal backup rows as failed so a
+// mid-backup process death cannot leave a pending row (or a partial archive)
+// that looks usable after cairnd restarts.
+func (s *Server) failIncompleteBackupsOnStartup() {
+	if s.store == nil {
+		return
+	}
+	incomplete, err := s.store.ListIncompleteBackups()
+	if err != nil {
+		log.Printf("cairnd: recovery: list incomplete backups: %v", err)
+		return
+	}
+	n, err := s.store.FailIncompleteBackups("interrupted (daemon restart)")
+	if err != nil {
+		log.Printf("cairnd: recovery: fail incomplete backups: %v", err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	log.Printf("cairnd: recovery: marked %d incomplete backup(s) as failed", n)
+	for _, b := range incomplete {
+		// Best-effort: drop partial archives so restore cannot pick them up by path.
+		if b.BackupPath != "" {
+			if st, err := os.Stat(b.BackupPath); err == nil && !st.IsDir() {
+				_ = os.Remove(b.BackupPath)
+				log.Printf("cairnd: recovery: removed partial backup archive %s", b.BackupPath)
+			}
+		}
+		s.store.CreateEvent(&api.Event{
+			ID:       uuid.New().String(),
+			VolumeID: &b.VolumeID,
+			BackupID: &b.ID,
+			Type:     events.BackupFailed.String(),
+			Message:  fmt.Sprintf("Backup %s marked failed after daemon restart (was %s)", b.ID, b.Status),
+		})
+	}
 }
 
 // logIncompleteWorkflowRecovery surfaces in-flight workflows and deploys after

@@ -23,13 +23,123 @@ import (
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
 )
+
+// testHome returns the user home directory without hardcoding a username.
+// Order: os.UserHomeDir (uses $HOME), then $HOME env, then t.TempDir().
+func testHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		return home
+	}
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	return t.TempDir()
+}
+
+// testRepoRoot walks up from cwd looking for the cairn go.mod module root.
+func testRepoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	dir := wd
+	for {
+		modPath := filepath.Join(dir, "go.mod")
+		if data, err := os.ReadFile(modPath); err == nil {
+			if strings.Contains(string(data), "module github.com/yumekaz/cairn") {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	// Fallback when tests run from tests/integration
+	if strings.HasSuffix(wd, filepath.Join("tests", "integration")) || strings.HasSuffix(wd, "tests/integration") {
+		return filepath.Dir(filepath.Dir(wd))
+	}
+	return wd
+}
+
+func looksLikeTestRootfs(path string) bool {
+	if path == "" {
+		return false
+	}
+	if st, err := os.Stat(filepath.Join(path, "bin", "busybox")); err == nil && !st.IsDir() {
+		return true
+	}
+	if st, err := os.Stat(filepath.Join(path, "bin", "sh")); err == nil && !st.IsDir() {
+		return true
+	}
+	return false
+}
+
+// testRootfs locates a Mini-Docker rootfs without hardcoding absolute home paths.
+// Order: CAIRN_ROOTFS, MINI_DOCKER_ROOTFS, sibling ../Mini-Docker/rootfs from repo root,
+// then a few cwd-relative candidates. Skips the test with a clear message if missing.
+func testRootfs(t *testing.T) string {
+	t.Helper()
+	if v := os.Getenv("CAIRN_ROOTFS"); v != "" {
+		if looksLikeTestRootfs(v) {
+			abs, err := filepath.Abs(v)
+			if err == nil {
+				return abs
+			}
+			return v
+		}
+		t.Fatalf("CAIRN_ROOTFS=%q does not look like a Mini-Docker rootfs (need bin/busybox or bin/sh)", v)
+	}
+	if v := os.Getenv("MINI_DOCKER_ROOTFS"); v != "" {
+		if looksLikeTestRootfs(v) {
+			abs, err := filepath.Abs(v)
+			if err == nil {
+				return abs
+			}
+			return v
+		}
+		t.Fatalf("MINI_DOCKER_ROOTFS=%q does not look like a Mini-Docker rootfs (need bin/busybox or bin/sh)", v)
+	}
+
+	repoRoot := testRepoRoot(t)
+	candidates := []string{
+		filepath.Join(repoRoot, "..", "Mini-Docker", "rootfs"),
+		filepath.Join(repoRoot, "Mini-Docker", "rootfs"),
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(wd, "..", "Mini-Docker", "rootfs"),
+			filepath.Join(wd, "..", "..", "Mini-Docker", "rootfs"),
+			filepath.Join(wd, "Mini-Docker", "rootfs"),
+		)
+	}
+	if home := testHome(t); home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, "Desktop", "Mini-Docker", "rootfs"),
+			filepath.Join(home, "mini-docker", "rootfs"),
+		)
+	}
+	for _, c := range candidates {
+		if looksLikeTestRootfs(c) {
+			abs, err := filepath.Abs(c)
+			if err == nil {
+				return abs
+			}
+			return c
+		}
+	}
+	t.Skip("Mini-Docker rootfs not found; set CAIRN_ROOTFS or MINI_DOCKER_ROOTFS, or place Mini-Docker as a sibling of the cairn repo (../Mini-Docker/rootfs)")
+	return ""
+}
+
 func TestEndToEndMLP(t *testing.T) {
 	cleanStaleIptables(t, 8080, 8081, 8082, 8085)
 	// 1. Check if the cairnd daemon socket exists. If not, skip integration tests.
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/home/yumekaz"
-	}
+	homeDir := testHome(t)
 	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -206,10 +316,8 @@ func TestEndToEndMLP(t *testing.T) {
 }
 
 func TestMigrationsAndRollback(t *testing.T) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/home/yumekaz"
-	}
+	homeDir := testHome(t)
+	rootfs := testRootfs(t)
 	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -223,7 +331,7 @@ func TestMigrationsAndRollback(t *testing.T) {
 	svcCfg1 := &api.ServiceConfig{
 		Name:      "migrated-service",
 		Kind:      "web",
-		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:     rootfs,
 		Command:   []string{"/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"},
 		Migration: "echo \"Migrated State\" > /www/index.html",
 		Ports: []api.PortMapping{
@@ -247,7 +355,7 @@ func TestMigrationsAndRollback(t *testing.T) {
 
 	t.Log("Deploying migrated-service (Deploy 1)...")
 	var result1 api.Service
-	err = client.Post(ctx, "/services", svcCfg1, &result1)
+	err := client.Post(ctx, "/services", svcCfg1, &result1)
 	if err != nil {
 		t.Fatalf("failed to deploy service with migration: %v", err)
 	}
@@ -311,7 +419,7 @@ func TestMigrationsAndRollback(t *testing.T) {
 	svcCfg2 := &api.ServiceConfig{
 		Name:    "migrated-service",
 		Kind:    "web",
-		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:   rootfs,
 		Command: []string{"/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"},
 		Ports: []api.PortMapping{
 			{Host: 8082, Container: 80},
@@ -355,7 +463,7 @@ func TestMigrationsAndRollback(t *testing.T) {
 	svcCfg3 := &api.ServiceConfig{
 		Name:      "migrated-service",
 		Kind:      "web",
-		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:     rootfs,
 		Command:   []string{"/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"},
 		Migration: "echo \"Migrated State 2\" > /www/index.html",
 		Ports: []api.PortMapping{
@@ -430,10 +538,8 @@ func TestMigrationsAndRollback(t *testing.T) {
 }
 
 func TestWorkersOneOffAndCron(t *testing.T) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/home/yumekaz"
-	}
+	homeDir := testHome(t)
+	rootfs := testRootfs(t)
 	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -448,12 +554,12 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 	workerCfg := &api.ServiceConfig{
 		Name:    "test-worker",
 		Kind:    "worker",
-		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:   rootfs,
 		Command: []string{"/bin/busybox", "sleep", "3600"},
 	}
 
 	var workerSvc api.Service
-	err = client.Post(ctx, "/services", workerCfg, &workerSvc)
+	err := client.Post(ctx, "/services", workerCfg, &workerSvc)
 	if err != nil {
 		t.Fatalf("failed to deploy worker service: %v", err)
 	}
@@ -534,7 +640,7 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 	cronCfg := &api.ServiceConfig{
 		Name:     "test-cron-service",
 		Kind:     "cron",
-		Image:    "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:    rootfs,
 		Schedule: "* * * * *",
 		Run:      "echo 'Hello from Cron Job'",
 	}
@@ -585,10 +691,8 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 }
 
 func TestDatabaseServiceDumpAndRestore(t *testing.T) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/home/yumekaz"
-	}
+	homeDir := testHome(t)
+	rootfs := testRootfs(t)
 	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -596,8 +700,8 @@ func TestDatabaseServiceDumpAndRestore(t *testing.T) {
 	}
 
 	// 1. Mock pg_dump and psql scripts inside rootfs
-	pgDumpPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/pg_dump"
-	psqlPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/psql"
+	pgDumpPath := filepath.Join(rootfs, "bin", "pg_dump")
+	psqlPath := filepath.Join(rootfs, "bin", "psql")
 
 	pgDumpScript := `#!/bin/sh
 echo "INSERT INTO test VALUES ('recovered-row');" > /backup_vol/backup_dump.sql
@@ -626,7 +730,7 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 	postgresCfg := &api.ServiceConfig{
 		Name:      "integration-db",
 		Kind:      "postgres",
-		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:     rootfs,
 		Command:   []string{"/bin/busybox", "sleep", "3600"},
 		Volumes: []api.VolumeConfig{
 			{Name: "integration-db-vol", MountPath: "/backup_vol"},
@@ -640,7 +744,7 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 
 	t.Log("Deploying integration-db service...")
 	var dbSvc api.Service
-	err = client.Post(ctx, "/services", postgresCfg, &dbSvc)
+	err := client.Post(ctx, "/services", postgresCfg, &dbSvc)
 	if err != nil {
 		t.Fatalf("failed to deploy database service: %v", err)
 	}
@@ -655,7 +759,7 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 	clientCfg := &api.ServiceConfig{
 		Name:      "client-service",
 		Kind:      "web",
-		Image:     "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:     rootfs,
 		Command:   []string{"/bin/busybox", "sleep", "3600"},
 		Environment: map[string]string{
 			"DATABASE_URL": "postgres://myuser:mypassword@integration-db:5432/mydb",
@@ -1369,10 +1473,7 @@ func TestReliabilityHardening(t *testing.T) {
 
 func TestReverseProxyAndEnvs(t *testing.T) {
 	// 1. Check if socket exists
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/home/yumekaz"
-	}
+	homeDir := testHome(t)
 	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		t.Skip("Cairn socket does not exist. Skipping proxy/envs integration test.")
@@ -1539,10 +1640,8 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 }
 
 func TestRedisAndMongoBackupRestore(t *testing.T) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/home/yumekaz"
-	}
+	homeDir := testHome(t)
+	rootfs := testRootfs(t)
 	socketPath := filepath.Join(homeDir, ".cairn", "cairnd.sock")
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -1550,9 +1649,9 @@ func TestRedisAndMongoBackupRestore(t *testing.T) {
 	}
 
 	// 1. Mock redis-cli, mongodump and mongorestore inside rootfs
-	redisCliPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/redis-cli"
-	mongoDumpPath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/mongodump"
-	mongoRestorePath := "/home/yumekaz/Desktop/Mini-Docker/rootfs/bin/mongorestore"
+	redisCliPath := filepath.Join(rootfs, "bin", "redis-cli")
+	mongoDumpPath := filepath.Join(rootfs, "bin", "mongodump")
+	mongoRestorePath := filepath.Join(rootfs, "bin", "mongorestore")
 
 	redisCliScript := `#!/bin/sh
 echo "REDIS-DUMMY-DATA" > /backup_vol/backup_dump.rdb
@@ -1593,7 +1692,7 @@ cat /backup_vol/restore_dump.archive > /backup_vol/restored_mongo.txt
 	redisCfg := &api.ServiceConfig{
 		Name:    "integration-redis",
 		Kind:    "redis",
-		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:   rootfs,
 		Command: []string{"/bin/busybox", "sleep", "3600"},
 		Volumes: []api.VolumeConfig{
 			{Name: "integration-redis-vol", MountPath: "/backup_vol"},
@@ -1646,7 +1745,7 @@ cat /backup_vol/restore_dump.archive > /backup_vol/restored_mongo.txt
 	mongoCfg := &api.ServiceConfig{
 		Name:    "integration-mongo",
 		Kind:    "mongodb",
-		Image:   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+		Image:   rootfs,
 		Command: []string{"/bin/busybox", "sleep", "3600"},
 		Volumes: []api.VolumeConfig{
 			{Name: "integration-mongo-vol", MountPath: "/backup_vol"},
@@ -1690,17 +1789,32 @@ cat /backup_vol/restore_dump.archive > /backup_vol/restored_mongo.txt
 }
 
 func cleanStaleIptables(t *testing.T, ports ...int) {
-	cmd := exec.Command("sudo", "-S", "iptables", "-t", "nat", "-S")
-	cmd.Stdin = strings.NewReader("mihir\n")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Logf("Warning: failed to list iptables rules: %v (stderr: %s)", err, stderr.String())
+	// Never hardcode a password. Prefer passwordless sudo (-n), else SUDO_PASSWORD env.
+	sudoPass := os.Getenv("SUDO_PASSWORD")
+	runSudo := func(args ...string) (stdout string, err error) {
+		var cmd *exec.Cmd
+		if sudoPass != "" {
+			cmd = exec.Command("sudo", append([]string{"-S", "-p", ""}, args...)...)
+			cmd.Stdin = strings.NewReader(sudoPass + "\n")
+		} else {
+			cmd = exec.Command("sudo", append([]string{"-n"}, args...)...)
+		}
+		var out, stderr bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("%w (stderr: %s)", err, stderr.String())
+		}
+		return out.String(), nil
+	}
+
+	out, err := runSudo("iptables", "-t", "nat", "-S")
+	if err != nil {
+		t.Logf("Warning: failed to list iptables rules: %v", err)
 		return
 	}
 
-	lines := strings.Split(stdout.String(), "\n")
+	lines := strings.Split(out, "\n")
 	for _, line := range lines {
 		for _, port := range ports {
 			if strings.Contains(line, fmt.Sprintf("--dport %d", port)) {
@@ -1712,13 +1826,9 @@ func cleanStaleIptables(t *testing.T, ports ...int) {
 				chain := parts[0]
 				ruleArgs := parts[1:]
 
-				args := append([]string{"-S", "iptables", "-t", "nat", "-D", chain}, ruleArgs...)
-				delCmd := exec.Command("sudo", args...)
-				delCmd.Stdin = strings.NewReader("mihir\n")
-				var delStderr bytes.Buffer
-				delCmd.Stderr = &delStderr
-				if err := delCmd.Run(); err != nil {
-					t.Logf("Warning: failed to delete iptables rule '%s': %v (stderr: %s)", line, err, delStderr.String())
+				delArgs := append([]string{"iptables", "-t", "nat", "-D", chain}, ruleArgs...)
+				if _, err := runSudo(delArgs...); err != nil {
+					t.Logf("Warning: failed to delete iptables rule '%s': %v", line, err)
 				} else {
 					t.Logf("Cleaned up stale iptables rule: %s", line)
 				}

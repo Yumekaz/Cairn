@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -29,8 +30,10 @@ func DefaultMiniDockerSockets() []string {
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
 		paths = append(paths, filepath.Join(xdg, "mini-docker", "mini-docker.sock"))
 	}
+	// Build /run/user/<uid>/... from the current process uid — never assume 1000.
+	uidSock := filepath.Join("/run/user", strconv.Itoa(os.Getuid()), "mini-docker", "mini-docker.sock")
 	paths = append(paths,
-		"/run/user/1000/mini-docker/mini-docker.sock",
+		uidSock,
 		"/var/run/mini-docker/mini-docker.sock",
 		"/var/run/mini-docker.sock",
 	)

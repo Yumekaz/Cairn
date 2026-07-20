@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Private cold-clone self-check: clone Cairn + DURAFLOW + Mini-Docker into a
 # fresh directory, build, test, and run clean_demo. No friends required.
+# Portable: default COLD_DIR is under $TMPDIR (not ~/Desktop).
 #
 # Usage:
 #   ./scripts/cold_clone_verify.sh
@@ -12,7 +13,8 @@ set -euo pipefail
 REPO_REMOTE_CAIRN="${CAIRN_REMOTE:-git@github.com:Yumekaz/Cairn.git}"
 REPO_REMOTE_DF="${DURAFLOW_REMOTE:-git@github.com:Yumekaz/DURAFLOW.git}"
 REPO_REMOTE_MD="${MINI_DOCKER_REMOTE:-git@github.com:Yumekaz/Mini-Docker.git}"
-COLD_DIR="${COLD_DIR:-$HOME/Desktop/cold-clone-check}"
+# Prefer TMPDIR (or /tmp) so headless/stranger machines without ~/Desktop work
+COLD_DIR="${COLD_DIR:-${TMPDIR:-/tmp}/cairn-cold-clone-check}"
 SKIP_DEMO="${SKIP_DEMO:-0}"
 
 log() { echo "[cold-clone] $*"; }
@@ -39,7 +41,13 @@ if ! grep -q 'replace github.com/yumekaz/duraflow => ../DURAFLOW' go.mod; then
   grep replace go.mod || true
 fi
 
+# Surface go.mod toolchain for stranger debug
+if grep -q '^go ' go.mod; then
+  log "go.mod: $(awk '/^go /{print; exit}' go.mod)"
+fi
+
 log "Building via install.sh"
+chmod +x scripts/install.sh
 ./scripts/install.sh
 
 export PATH="$COLD_DIR/Cairn/bin:${HOME}/.local/bin:${PATH}"

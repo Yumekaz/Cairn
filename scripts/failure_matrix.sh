@@ -2,16 +2,17 @@
 # Single-node failure matrix (Phase B / roadmap Phase 17).
 #
 # Usage:
-#   ./scripts/failure_matrix.sh              # run F1 F2 F3 F4 F6
+#   ./scripts/failure_matrix.sh              # run F1 F2 F3 F4 F5 F6
 #   CASE=F2 ./scripts/failure_matrix.sh      # one case
 #   CASE=F1,F6 ./scripts/failure_matrix.sh
+#   CASE=F5 ./scripts/failure_matrix.sh      # backup interrupt only
 #
 # Cases:
 #   F1 SIGTERM cairnd mid-migration (mid_deploy_crash_demo)
 #   F2 SIGKILL cairnd mid-migration
 #   F3 Kill Mini-Docker daemon, doctor fails, restart MD + recover service
 #   F4 Kill app container; reconciliation recreates/restarts
-#   F5 (optional) interrupt backup — CASE=F5
+#   F5 SIGKILL cairnd mid-backup: no success→missing/corrupt archive; incomplete failed
 #   F6 Broken deploy after healthy (clean_demo path subset)
 
 set -euo pipefail
@@ -20,7 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="${ROOT}/bin:${HOME}/.local/bin:${PATH}"
 
-CASE="${CASE:-F1,F2,F3,F4,F6}"
+CASE="${CASE:-F1,F2,F3,F4,F5,F6}"
 LOG_DIR="${LOG_DIR:-/tmp/cairn-proof-runs}"
 mkdir -p "$LOG_DIR"
 LOG="${LOG_DIR}/failure_matrix_$(date +%Y%m%d-%H%M%S).log"
@@ -28,48 +29,13 @@ LOG="${LOG_DIR}/failure_matrix_$(date +%Y%m%d-%H%M%S).log"
 log() { echo "[matrix] $*" | tee -a "$LOG"; }
 die() { echo "[matrix] RED: $*" | tee -a "$LOG" >&2; exit 1; }
 
-if [[ -z "${CAIRN_ROOTFS:-}" ]]; then
-  for cand in "${ROOT}/../Mini-Docker/rootfs" "${HOME}/Desktop/Mini-Docker/rootfs"; do
-    if [[ -x "${cand}/bin/busybox" ]]; then
-      export CAIRN_ROOTFS="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
-      break
-    fi
-  done
-fi
+# Shared Mini-Docker / cairnd bootstrap (starts MD if socket dead; no hang on sudo)
+# shellcheck source=lib/runtime.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime.sh"
+export CAIRN_RUNTIME_LOG="$LOG"
+export CAIRN_CAIRND_LOG="$LOG"
+cairn_runtime_discover
 [[ -n "${CAIRN_ROOTFS:-}" ]] || die "set CAIRN_ROOTFS"
-export MINI_DOCKER_SOCKET="${MINI_DOCKER_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock}"
-export PYTHONPATH="${PYTHONPATH:-${ROOT}/../Mini-Docker}"
-
-ensure_cairnd() {
-  if ! cairn status >/dev/null 2>&1; then
-    nohup cairnd >>"$LOG" 2>&1 &
-    for _ in $(seq 1 40); do
-      cairn status >/dev/null 2>&1 && return 0
-      sleep 0.15
-    done
-    die "cairnd not ready"
-  fi
-}
-
-ensure_minidocker() {
-  if [[ -S "$MINI_DOCKER_SOCKET" ]]; then
-    if cairn doctor >/dev/null 2>&1 || true; then
-      # probe socket
-      if python3 - <<PY 2>/dev/null
-import socket
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-s.settimeout(2)
-s.connect("$MINI_DOCKER_SOCKET")
-s.sendall(b"GET /containers/json HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
-print(s.recv(32))
-PY
-      then
-        return 0
-      fi
-    fi
-  fi
-  die "Mini-Docker socket not usable at $MINI_DOCKER_SOCKET (start daemon first)"
-}
 
 clean_counter_pending() {
   python3 - <<'PY' >>"$LOG" 2>&1 || true
@@ -127,7 +93,8 @@ run_F3() {
   mkdir -p "${HOME}/.cairn/volumes/counter-data"
   echo "F3_OK" >"${HOME}/.cairn/volumes/counter-data/index.html"
   cairn deploy examples/counter-api/cairn.yaml >>"$LOG" 2>&1
-  curl -sf -m 3 http://127.0.0.1:8080/index.html | grep -q F3_OK
+  BODY="$(curl -sf -m 3 http://127.0.0.1:8080/index.html || true)"
+  case "$BODY" in *F3_OK*) ;; *) die "expected F3_OK (got: ${BODY:0:80})" ;; esac
 
   # Kill only the process holding the Mini-Docker unix socket (not this script).
   log "Killing process holding $MINI_DOCKER_SOCKET"
@@ -173,57 +140,17 @@ run_F3() {
     log "F3: doctor failed as expected with Mini-Docker dead"
   fi
 
-  # Restart Mini-Docker (requires sudo if not already root)
-  log "Restarting Mini-Docker"
-  MD_PY="${MINI_DOCKER_PYTHON:-}"
-  if [[ -z "$MD_PY" ]]; then
-    for cand in "${ROOT}/../Mini-Docker/venv/bin/python3" "${HOME}/Desktop/Mini-Docker/venv/bin/python3" "python3"; do
-      if [[ -x "$cand" ]] || command -v "$cand" >/dev/null 2>&1; then MD_PY="$cand"; break; fi
-    done
-  fi
-  MD_SRC="${ROOT}/../Mini-Docker"
-  [[ -d "$MD_SRC" ]] || MD_SRC="${HOME}/Desktop/Mini-Docker"
-  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
-    printf '%s\n' "$SUDO_PASSWORD" | sudo -S mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")" 2>/dev/null || true
-    printf '%s\n' "$SUDO_PASSWORD" | sudo -S rm -f "$MINI_DOCKER_SOCKET" 2>/dev/null || true
-    printf '%s\n' "$SUDO_PASSWORD" | sudo -S env PYTHONPATH="$MD_SRC" \
-      "$MD_PY" -m mini_docker daemon --socket "$MINI_DOCKER_SOCKET" --socket-mode 666 \
-      >/tmp/md-f3.log 2>&1 &
-  elif [[ "${EUID}" -eq 0 ]]; then
-    mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")"
-    rm -f "$MINI_DOCKER_SOCKET" 2>/dev/null || true
-    env PYTHONPATH="$MD_SRC" "$MD_PY" -m mini_docker daemon \
-      --socket "$MINI_DOCKER_SOCKET" --socket-mode 666 >/tmp/md-f3.log 2>&1 &
-  else
-    sudo -n mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")" 2>/dev/null || true
-    sudo -n rm -f "$MINI_DOCKER_SOCKET" 2>/dev/null || true
-    sudo -n env PYTHONPATH="$MD_SRC" "$MD_PY" -m mini_docker daemon \
-      --socket "$MINI_DOCKER_SOCKET" --socket-mode 666 >/tmp/md-f3.log 2>&1 &
-  fi
-  for _ in $(seq 1 40); do
-    if [[ -S "$MINI_DOCKER_SOCKET" ]]; then
-      if python3 - <<PY 2>/dev/null
-import socket
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-s.settimeout(1)
-s.connect("$MINI_DOCKER_SOCKET")
-s.sendall(b"GET /containers/json HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
-s.recv(8)
-PY
-      then break; fi
-    fi
-    sleep 0.25
-  done
-  if [[ ! -S "$MINI_DOCKER_SOCKET" ]]; then
-    log "md-f3.log: $(tail -20 /tmp/md-f3.log 2>/dev/null || true)"
-    die "F3: Mini-Docker did not restart (start manually with sudo)"
-  fi
+  # Restart Mini-Docker via shared bootstrap (sudo -n / SUDO_PASSWORD / root only)
+  log "Restarting Mini-Docker via ensure_minidocker"
+  export CAIRN_MD_LOG=/tmp/md-f3.log
+  ensure_minidocker
 
   # Recover service via restart (recreate path)
   ensure_cairnd
   cairn restart counter-api >>"$LOG" 2>&1 || cairn deploy examples/counter-api/cairn.yaml >>"$LOG" 2>&1
   sleep 2
-  curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q F3_OK
+  BODY="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+  case "$BODY" in *F3_OK*) ;; *) die "expected F3_OK after recover (got: ${BODY:0:80})" ;; esac
   assert_counter_healthy >>"$LOG"
   log "GREEN F3"
 }
@@ -236,7 +163,8 @@ run_F4() {
   mkdir -p "${HOME}/.cairn/volumes/counter-data"
   echo "F4_OK" >"${HOME}/.cairn/volumes/counter-data/index.html"
   cairn deploy examples/counter-api/cairn.yaml >>"$LOG" 2>&1
-  curl -sf -m 3 http://127.0.0.1:8080/index.html | grep -q F4_OK
+  BODY="$(curl -sf -m 3 http://127.0.0.1:8080/index.html || true)"
+  case "$BODY" in *F4_OK*) ;; *) die "expected F4_OK (got: ${BODY:0:80})" ;; esac
 
   RID="$(cairn inspect counter-api | awk -F': *' '/^Runtime ID:/{print $2}' | tr -d '[:space:]')"
   [[ -n "$RID" ]] || die "F4: no runtime id"
@@ -269,16 +197,18 @@ PY
   log "Waiting for reconciliation (up to 45s)..."
   deadline=$((SECONDS + 45))
   while (( SECONDS < deadline )); do
-    if curl -sf -m 2 http://127.0.0.1:8080/index.html 2>/dev/null | grep -q F4_OK; then
-      break
-    fi
+    B="$(curl -sf -m 2 http://127.0.0.1:8080/index.html 2>/dev/null || true)"
+    case "$B" in
+      *F4_OK*) break ;;
+    esac
     # nudge via restart if reconcile is slow
     if (( SECONDS > 20 )); then
       cairn restart counter-api >>"$LOG" 2>&1 || true
     fi
     sleep 2
   done
-  curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q F4_OK || die "F4: service did not recover"
+  BODY="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+  case "$BODY" in *F4_OK*) ;; *) die "F4: service did not recover (got: ${BODY:0:80})" ;; esac
   assert_counter_healthy >>"$LOG"
   # Reconcile (or CLI restart nudge) must leave a ServiceRestarted audit event
   EVENTS_F4="$(cairn events 2>/dev/null || true)"
@@ -292,43 +222,197 @@ PY
 }
 
 run_F5() {
-  log "=== F5 backup interrupt ==="
+  log "=== F5 backup interrupt (SIGKILL mid-backup) ==="
   ensure_minidocker
   ensure_cairnd
   clean_counter_pending
-  mkdir -p "${HOME}/.cairn/volumes/counter-data"
-  echo "F5_OK" >"${HOME}/.cairn/volumes/counter-data/index.html"
+  VOL_DIR="${HOME}/.cairn/volumes/counter-data"
+  mkdir -p "$VOL_DIR"
+  echo "F5_OK" >"${VOL_DIR}/index.html"
+  # Inflate volume so tar.gz takes long enough to interrupt mid-flight (not a no-op race).
+  # Mix many small files + poorly compressible blob so gzip cannot finish instantly.
+  python3 - <<'PY' >>"$LOG" 2>&1
+import os
+vol = os.path.expanduser("~/.cairn/volumes/counter-data")
+os.makedirs(vol, exist_ok=True)
+# Remove previous pad files to keep deploy mounts clean
+for name in os.listdir(vol):
+    if name.startswith("pad_") or name.startswith("blob_"):
+        try:
+            os.remove(os.path.join(vol, name))
+        except OSError:
+            pass
+chunk = (b"F5pad" * 2048)  # 10 KiB repeating
+for i in range(800):
+    with open(os.path.join(vol, f"pad_{i:04d}.bin"), "wb") as f:
+        f.write(chunk)
+# ~16 MiB low-compressibility payload
+with open(os.path.join(vol, "blob_urandom.bin"), "wb") as f:
+    f.write(os.urandom(16 * 1024 * 1024))
+with open(os.path.join(vol, "index.html"), "w") as f:
+    f.write("F5_OK\n")
+print("volume padded for slow backup")
+PY
   cairn deploy examples/counter-api/cairn.yaml >>"$LOG" 2>&1
+  BODY_PRE="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+  case "$BODY_PRE" in
+    *F5_OK*) ;;
+    *) die "F5: counter-api not serving F5_OK before backup (got: ${BODY_PRE:0:80})" ;;
+  esac
+  assert_counter_healthy >>"$LOG"
 
-  # Start backup in background and kill cairnd quickly
+  # Snapshot pre-interrupt backup IDs so we can identify the interrupted attempt.
+  PRE_IDS="$(python3 - <<'PY'
+import sqlite3, os
+con=sqlite3.connect(os.path.expanduser("~/.cairn/cairn.db"))
+rows=con.execute("SELECT id FROM backups").fetchall()
+print(",".join(r[0] for r in rows))
+PY
+)"
+
+  log "Starting backup create (background); will SIGKILL cairnd once pending row appears"
   set +e
   cairn backup create counter-data >"${TMPDIR:-/tmp}/f5-backup.out" 2>&1 &
   BPID=$!
   set -e
-  sleep 0.3
+
+  # Wait until a new non-terminal backup row exists (proof we hit mid-flight).
+  SAW_PENDING=0
+  for _ in $(seq 1 80); do
+    PENDING_NOW="$(python3 - <<PY
+import sqlite3, os
+pre=set("${PRE_IDS}".split(",")) if "${PRE_IDS}" else set()
+con=sqlite3.connect(os.path.expanduser("~/.cairn/cairn.db"))
+rows=list(con.execute("SELECT id, status FROM backups WHERE status NOT IN ('success','failed')"))
+new=[r for r in rows if r[0] not in pre]
+print(len(new))
+if new:
+    print(new[0][0], new[0][1])
+PY
+)"
+    NEW_COUNT="$(printf '%s\n' "$PENDING_NOW" | head -1 | tr -d '[:space:]')"
+    if [[ "${NEW_COUNT:-0}" -ge 1 ]]; then
+      SAW_PENDING=1
+      log "Saw in-flight backup: $(printf '%s\n' "$PENDING_NOW" | sed -n '2p')"
+      break
+    fi
+    # If backup already finished success before we could kill, still proceed to kill
+    # (consistency checks below still hold) but note soft path.
+    if ! kill -0 "$BPID" 2>/dev/null; then
+      log "backup CLI exited before pending observed (fast path)"
+      break
+    fi
+    sleep 0.05
+  done
+
+  CAIRND_PID=""
   if [[ -f "${HOME}/.cairn/cairnd.pid" ]]; then
-    kill -TERM "$(cat "${HOME}/.cairn/cairnd.pid")" 2>/dev/null || true
+    CAIRND_PID="$(tr -d '[:space:]' <"${HOME}/.cairn/cairnd.pid" || true)"
+  fi
+  if [[ -n "${CAIRND_PID}" ]] && kill -0 "$CAIRND_PID" 2>/dev/null; then
+    log "SIGKILL cairnd pid=$CAIRND_PID mid-backup (SAW_PENDING=$SAW_PENDING)"
+    kill -KILL "$CAIRND_PID" 2>/dev/null || true
+  else
+    # Fallback: kill by process name if pidfile stale
+    log "pidfile missing/stale; SIGKILL any cairnd"
+    pkill -KILL -x cairnd 2>/dev/null || true
   fi
   wait "$BPID" 2>/dev/null || true
-  sleep 1
+  sleep 0.5
+  # Confirm daemon is down before recovery
+  if [[ -n "${CAIRND_PID}" ]] && kill -0 "$CAIRND_PID" 2>/dev/null; then
+    die "F5: cairnd pid $CAIRND_PID still alive after SIGKILL"
+  fi
+
   ensure_cairnd
-  # After recovery, either last backup success exists or a failed backup row — no silent success with empty path
-  python3 - <<'PY' >>"$LOG" 2>&1
+  # Allow failIncompleteBackupsOnStartup + optional DuraFlow re-run to settle.
+  # Poll until no non-terminal backup rows remain (deadline ~20s).
+  for _ in $(seq 1 40); do
+    PENDING_LEFT="$(python3 - <<'PY'
 import sqlite3, os
 con=sqlite3.connect(os.path.expanduser("~/.cairn/cairn.db"))
-rows=list(con.execute("SELECT id, status, size_bytes, backup_path FROM backups ORDER BY created_at DESC LIMIT 5"))
-print("backups", rows)
-# service still healthy
-svc=con.execute("SELECT actual_state FROM services WHERE name='counter-api'").fetchone()
-assert svc and svc[0]=='running', svc
-# no backup with success and zero size + missing file falsely claiming success beyond empty volume
-for r in rows:
-    if r[1]=='success' and r[2] is not None and r[2] < 0:
-        raise SystemExit('negative backup size')
-print("F5 backup rows OK")
+n=con.execute("SELECT COUNT(1) FROM backups WHERE status NOT IN ('success','failed')").fetchone()[0]
+print(n)
 PY
-  curl -sf -m 3 http://127.0.0.1:8080/index.html | grep -q F5_OK
-  log "GREEN F5"
+)"
+    PENDING_LEFT="$(printf '%s' "$PENDING_LEFT" | tr -d '[:space:]')"
+    if [[ "${PENDING_LEFT:-0}" -eq 0 ]]; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  python3 - <<'PY' >>"$LOG" 2>&1
+import gzip, os, sqlite3, sys
+
+con = sqlite3.connect(os.path.expanduser("~/.cairn/cairn.db"))
+rows = list(con.execute(
+    "SELECT id, status, size_bytes, backup_path, checksum, failure_reason "
+    "FROM backups ORDER BY created_at DESC LIMIT 20"
+))
+print("backups after recovery:", rows)
+
+# 1) No non-terminal backup rows may linger after recovery.
+pending = [r for r in rows if r[1] not in ("success", "failed")]
+if pending:
+    raise SystemExit(f"F5: incomplete backup still non-terminal after recovery: {pending}")
+
+# 2) Every success must point at a real, non-empty, gzip-readable archive.
+for r in rows:
+    bid, status, size_bytes, path, checksum, reason = r
+    if status != "success":
+        continue
+    if not path:
+        raise SystemExit(f"F5: success backup {bid} has empty path")
+    if not os.path.isfile(path):
+        raise SystemExit(f"F5: success backup {bid} points to missing archive: {path}")
+    st = os.stat(path)
+    if st.st_size <= 0:
+        raise SystemExit(f"F5: success backup {bid} archive is empty: {path}")
+    if size_bytes is not None and size_bytes < 0:
+        raise SystemExit(f"F5: success backup {bid} negative size_bytes")
+    if size_bytes is not None and size_bytes > 0 and st.st_size != size_bytes:
+        # Allow tiny metadata drift only if both positive; hard-fail mismatch.
+        raise SystemExit(
+            f"F5: success backup {bid} size_bytes={size_bytes} != file={st.st_size}"
+        )
+    # Corrupt partial tar.gz must not be marked success.
+    try:
+        with gzip.open(path, "rb") as gz:
+            # Read a bit to force header + stream validation
+            _ = gz.read(64 * 1024)
+    except Exception as e:
+        raise SystemExit(f"F5: success backup {bid} archive corrupt/unreadable: {e}")
+    if not checksum:
+        raise SystemExit(f"F5: success backup {bid} missing checksum")
+
+# 3) Service must still be running (platform invariant after cairnd recovery).
+svc = con.execute(
+    "SELECT actual_state, runtime_id FROM services WHERE name='counter-api'"
+).fetchone()
+if not svc or svc[0] != "running" or not svc[1]:
+    raise SystemExit(f"F5: counter-api not running after recovery: {svc}")
+
+print("F5 backup consistency OK")
+PY
+
+  # App still serves expected volume content (or recovered container still mounts volume).
+  BODY_POST="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+  case "$BODY_POST" in
+    *F5_OK*) ;;
+    *)
+      # Nudge restart once if reconcile is slow, then re-check.
+      cairn restart counter-api >>"$LOG" 2>&1 || true
+      sleep 2
+      BODY_POST="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+      case "$BODY_POST" in
+        *F5_OK*) ;;
+        *) die "F5: app not serving F5_OK after recovery (got: ${BODY_POST:0:80})" ;;
+      esac
+      ;;
+  esac
+  assert_counter_healthy >>"$LOG"
+  log "GREEN F5 (SAW_PENDING=$SAW_PENDING)"
 }
 
 run_F6() {

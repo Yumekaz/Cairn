@@ -14,7 +14,7 @@ To build and test Cairn locally, follow these steps:
    cd Cairn
    ```
 2. **Install Go & Python**:
-   - Ensure Go v1.22+ and Python v3.10+ are available on your system.
+   - Ensure Go **1.26.x** (matches `go.mod`) and Python v3.10+ are available on your system.
 3. **Build the Project**:
    ```bash
    go build -o bin/cairn ./cmd/cairn

@@ -8,145 +8,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="${CAIRN_DEMO_SCRATCH:-}"
 LOG() { echo "[demo] $*"; }
 die() { echo "[demo] ERROR: $*" >&2; exit 1; }
+assert_http_body() {
+  local needle="$1"
+  local body
+  body="$(curl -sf -m 5 http://127.0.0.1:8080/index.html || true)"
+  case "$body" in
+    *"$needle"*) ;;
+    *) die "expected body to contain $needle (got: ${body:0:80})" ;;
+  esac
+}
 
 # --- discover tools ---
 export PATH="${ROOT}/bin:${HOME}/.local/bin:${PATH}"
 command -v cairn >/dev/null || die "cairn binary not found (build: make build or go build -o bin/cairn ./cmd/cairn)"
 command -v cairnd >/dev/null || die "cairnd binary not found"
 
-# --- rootfs discovery ---
-if [[ -z "${CAIRN_ROOTFS:-}" ]]; then
-  if [[ -n "${MINI_DOCKER_ROOTFS:-}" ]]; then
-    export CAIRN_ROOTFS="$MINI_DOCKER_ROOTFS"
-  else
-    for cand in \
-      "${ROOT}/../Mini-Docker/rootfs" \
-      "${PWD}/../Mini-Docker/rootfs" \
-      "${HOME}/Desktop/Mini-Docker/rootfs" \
-      "${HOME}/mini-docker/rootfs"; do
-      if [[ -x "${cand}/bin/busybox" || -x "${cand}/bin/sh" ]]; then
-        export CAIRN_ROOTFS="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
-        break
-      fi
-    done
-  fi
-fi
+# Shared Mini-Docker / cairnd bootstrap
+# shellcheck source=lib/runtime.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime.sh"
+cairn_runtime_discover
 [[ -n "${CAIRN_ROOTFS:-}" && -d "$CAIRN_ROOTFS" ]] || die "Set CAIRN_ROOTFS to a Mini-Docker rootfs (bin/busybox required)"
 LOG "CAIRN_ROOTFS=$CAIRN_ROOTFS"
-
-# --- Mini-Docker python ---
-MD_PY="${MINI_DOCKER_PYTHON:-}"
-if [[ -z "$MD_PY" ]]; then
-  for cand in \
-    "${ROOT}/../Mini-Docker/venv/bin/python3" \
-    "${HOME}/Desktop/Mini-Docker/venv/bin/python3" \
-    "python3"; do
-    if [[ -x "$cand" ]] || command -v "$cand" >/dev/null 2>&1; then
-      MD_PY="$cand"
-      break
-    fi
-  done
-fi
-export PYTHONPATH="${MINI_DOCKER_SRC:-${ROOT}/../Mini-Docker}:${PYTHONPATH:-}"
-
-# --- socket path ---
-if [[ -z "${MINI_DOCKER_SOCKET:-}" ]]; then
-  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-    MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR}/mini-docker/mini-docker.sock"
-  else
-    MINI_DOCKER_SOCKET="/run/user/$(id -u)/mini-docker/mini-docker.sock"
-  fi
-fi
-export MINI_DOCKER_SOCKET
-MD_SOCK_DIR="$(dirname "$MINI_DOCKER_SOCKET")"
-
-SUDO=""
-if [[ "${EUID}" -ne 0 ]]; then
-  if command -v sudo >/dev/null; then
-    SUDO="sudo"
-  else
-    die "root or sudo required to start Mini-Docker daemon"
-  fi
-fi
-
-# --- start Mini-Docker (single daemon) ---
-start_minidocker() {
-  # Prefer an already-running healthy daemon (no root needed).
-  if [[ -S "$MINI_DOCKER_SOCKET" ]]; then
-    if MINI_DOCKER_SOCKET="$MINI_DOCKER_SOCKET" cairn doctor >/dev/null 2>&1; then
-      LOG "Mini-Docker already healthy at $MINI_DOCKER_SOCKET"
-      return 0
-    fi
-    # Socket present — try probe via python without doctor (cairnd may be down)
-    if "$MD_PY" - <<PY 2>/dev/null
-import socket,sys
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-s.settimeout(2)
-s.connect("$MINI_DOCKER_SOCKET")
-s.sendall(b"GET /containers/json HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
-data=s.recv(256)
-sys.exit(0 if data.startswith(b"HTTP") else 1)
-PY
-    then
-      LOG "Mini-Docker socket responsive at $MINI_DOCKER_SOCKET"
-      return 0
-    fi
-    LOG "Stale/unhealthy Mini-Docker socket — will restart (requires sudo)"
-  fi
-
-  LOG "Ensuring Mini-Docker socket dir: $MD_SOCK_DIR"
-  if [[ ! -d "$MD_SOCK_DIR" ]]; then
-    $SUDO mkdir -p "$MD_SOCK_DIR" || die "cannot create $MD_SOCK_DIR (need sudo)"
-  fi
-  if [[ -S "$MINI_DOCKER_SOCKET" ]]; then
-    $SUDO rm -f "$MINI_DOCKER_SOCKET" || true
-  fi
-  LOG "Starting Mini-Docker daemon on $MINI_DOCKER_SOCKET"
-  $SUDO env PYTHONPATH="$PYTHONPATH" "$MD_PY" -m mini_docker daemon \
-    --socket "$MINI_DOCKER_SOCKET" \
-    --socket-mode 666 \
-    >/tmp/cairn-minidocker-demo.log 2>&1 &
-  # wait for socket
-  for i in $(seq 1 30); do
-    if [[ -S "$MINI_DOCKER_SOCKET" ]]; then
-      sleep 0.3
-      break
-    fi
-    sleep 0.2
-  done
-  [[ -S "$MINI_DOCKER_SOCKET" ]] || die "Mini-Docker socket did not appear (see /tmp/cairn-minidocker-demo.log). Start it manually with sudo."
-}
-
-# --- start cairnd ---
-start_cairnd() {
-  cairn init >/dev/null 2>&1 || true
-  # Point config at our Mini-Docker socket if config exists
-  local cfg="${HOME}/.cairn/cairnd-config.yaml"
-  if [[ -f "$cfg" ]]; then
-    # ensure mini_docker_socket line
-    if grep -q 'mini_docker_socket:' "$cfg"; then
-      # portable sed
-      sed -i.bak "s|mini_docker_socket:.*|mini_docker_socket: ${MINI_DOCKER_SOCKET}|" "$cfg" || true
-    else
-      echo "mini_docker_socket: ${MINI_DOCKER_SOCKET}" >>"$cfg"
-    fi
-  fi
-  if ! cairn status >/dev/null 2>&1; then
-    LOG "Starting cairnd"
-    # stop stale
-    cairn daemon stop >/dev/null 2>&1 || true
-    rm -f "${HOME}/.cairn/cairnd.sock" "${HOME}/.cairn/cairnd.pid" 2>/dev/null || true
-    nohup cairnd >/tmp/cairnd-demo.out 2>&1 &
-    for i in $(seq 1 40); do
-      if cairn status >/dev/null 2>&1; then
-        break
-      fi
-      sleep 0.15
-    done
-  fi
-  cairn status >/dev/null || die "cairnd did not become ready"
-  LOG "cairnd ready"
-}
+LOG "MINI_DOCKER_SOCKET=$MINI_DOCKER_SOCKET"
 
 # --- seed volume content for httpd ---
 seed_volume() {
@@ -162,8 +45,8 @@ seed_volume() {
 }
 
 # --- main flow ---
-start_minidocker
-start_cairnd
+ensure_minidocker
+ensure_cairnd
 
 LOG "Preflight (cairn doctor)"
 cairn doctor
@@ -182,7 +65,7 @@ LOG "Mutate volume + restart"
 echo "STATE_OK" >"${HOME}/.cairn/volumes/counter-data/index.html"
 cairn restart counter-api
 sleep 1
-curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q STATE_OK
+assert_http_body STATE_OK
 LOG "persistence after restart: OK"
 
 LOG "Backup"
@@ -205,7 +88,7 @@ set -e
 echo "$BROKEN_OUT"
 [[ "$BROKEN_RC" -ne 0 ]] || die "broken deploy should have failed"
 # still serving
-curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q STATE_OK
+assert_http_body STATE_OK
 
 INSPECT="$(cairn inspect counter-api)"
 echo "$INSPECT"
@@ -222,7 +105,7 @@ LOG "Corrupt volume + restore"
 echo "CORRUPTED" >"${HOME}/.cairn/volumes/counter-data/index.html"
 cairn restore counter-data "$BACKUP_ID"
 sleep 1
-curl -sf -m 5 http://127.0.0.1:8080/index.html | grep -q STATE_OK
+assert_http_body STATE_OK
 LOG "restore: OK"
 
 LOG "Dashboard"

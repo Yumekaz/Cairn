@@ -1,32 +1,25 @@
 # Cairn Quickstart Guide
 
-This guide gets you up and running with Cairn PaaS and Mini-Docker on a local Linux host.
+Single-node Linux. Three sibling repos. No multi-node.
 
 ---
 
-## 🛠️ Prerequisites
+## Prerequisites
 
-Before installing, make sure your Linux system meets these requirements:
+1. **Go**: **1.26.x** (matches `go.mod`; older toolchains will not build this module).
+2. **Python**: 3.10+ (Mini-Docker daemon).
+3. **OverlayFS**: kernel support.
 
-1. **Go**: Version 1.22+ (to compile binaries).
-2. **Python**: Version 3.10+ (to run the Mini-Docker daemon).
-3. **OverlayFS**: The Linux kernel must support OverlayFS.
-
-### Load OverlayFS Module
-Ensure OverlayFS is active:
 ```bash
 sudo modprobe overlay
-```
-To load it automatically on system boot, add it to `/etc/modules`:
-```bash
-echo "overlay" | sudo tee -a /etc/modules
+# optional persist: echo overlay | sudo tee -a /etc/modules
 ```
 
 ---
 
-## ⚙️ Step 1: Sibling layout + Install Cairn
+## Stranger path (spine only)
 
-Cairn depends on a **local DuraFlow checkout** (`go.mod` replace → `../DURAFLOW`). Clone three repos side by side:
+### 1. Three siblings + install
 
 ```bash
 mkdir -p ~/src && cd ~/src
@@ -35,158 +28,108 @@ git clone git@github.com:Yumekaz/DURAFLOW.git
 git clone git@github.com:Yumekaz/Mini-Docker.git
 cd Cairn
 ./scripts/install.sh
-```
-
-The installer will:
-- Refuse to build if `../DURAFLOW` is missing (or honor `DURAFLOW_PATH`)
-- Compile `cairn` / `cairnd` into `./bin/` and install under `~/.local/bin/`
-- Create `~/.cairn/` layout
-
-```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-**Private verification without other people:** `./scripts/cold_clone_verify.sh` re-clones into `~/Desktop/cold-clone-check` and runs the full demo.
+`go.mod` uses `replace => ../DURAFLOW`. Installer refuses the build if that sibling is missing (or set `DURAFLOW_PATH`).
 
----
-
-## 🐋 Step 2: Start Mini-Docker Daemon
-
-Cairn uses Mini-Docker as its containerization runtime backend. Start **one** Mini-Docker daemon as root (dual daemons on the same socket cause EOF create failures):
+### 2. Runtime env + Mini-Docker
 
 ```bash
-# Point this at your Mini-Docker checkout rootfs for examples
-export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
+export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
 export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
 
 sudo mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")"
-sudo python3 -m mini_docker daemon \
+sudo env PYTHONPATH="$PYTHONPATH" python3 -m mini_docker daemon \
   --socket "$MINI_DOCKER_SOCKET" \
   --socket-mode 666
 ```
 
----
+Start **one** Mini-Docker daemon (dual daemons on the same socket cause create failures). Root (or careful rootless) required for the daemon.
 
-## 🚀 Step 3: Start the Cairn Daemon
-
-1. Initialize the SQLite metadata store and default configuration:
-   ```bash
-   cairn init
-   ```
-2. Check readiness:
-   ```bash
-   cairn doctor
-   ```
-3. Start the control plane daemon:
-   ```bash
-   cairnd
-   # or
-   cairn daemon start
-   ```
-
-### One-shot portable demo
-
-From a cold machine (after Mini-Docker rootfs is available):
+### 3. Init + doctor
 
 ```bash
-export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+cairn init
+cairn doctor
+```
+
+### 4. Prove MLP (or short demo)
+
+```bash
+# Closeout A — full single-node proof
+./scripts/prove_mlp.sh
+
+# If prove_mlp.sh is not present yet, either:
 ./scripts/clean_demo.sh
-# or: make demo
+# or interim compose:
+N=1 SKIP_COLD_CLONE=1 ./scripts/stability_gate.sh
+./scripts/failure_matrix.sh
+./scripts/rollback_safety_demo.sh
 ```
 
-This starts Mini-Docker if needed, starts `cairnd`, deploys `examples/counter-api` **by directory**, restarts, backs up, rejects a broken deploy, restores, and checks the dashboard.
+`clean_demo.sh` starts `cairnd` if needed, deploys `examples/counter-api`, restart/backup/broken-deploy/restore, and checks the event story.
+
+**CI note:** GitHub Actions runs unit + build + `bash -n` only. Full proofs need this local path (Linux + Mini-Docker + DURAFLOW).
+
+Private cold clone of the three spine repos: `./scripts/cold_clone_verify.sh`.
 
 ---
 
-## 📦 Step 4: Deploy your First App
+## Deploy counter-api yourself
 
-Deploy the bundled stateful `counter-api` application (file **or** directory containing `cairn.yaml`):
 ```bash
-export CAIRN_ROOTFS=/path/to/Mini-Docker/rootfs
+export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
+cairn daemon start   # if not already running
 cairn deploy examples/counter-api
-# equivalent:
-cairn deploy examples/counter-api/cairn.yaml
-```
-
-Check the status of your services:
-```bash
-# General daemon status (uptime, active count, disk free/warnings)
-cairn status
-
-# Tabular process list of running containers
 cairn ps
-
-# View the full JSON metadata registered for your service
-cairn inspect counter-api
-```
-
-Interact with the running API (serving on `http://localhost:8080/`):
-```bash
+cairn status
 curl http://localhost:8080/index.html
 ```
 
 ---
 
-## 💾 Step 5: Test State Persistence & Recovery
+## State persistence & recovery
 
-1. **State Persistence**: Write something to the persistent volume mounted under `~/.cairn/volumes/counter-data/`:
-   ```bash
-   echo "Stateful Data A" > ~/.cairn/volumes/counter-data/index.html
-   curl http://localhost:8080/index.html
-   ```
-2. **Container Restarts**: Restart the service. The data should persist:
-   ```bash
-   cairn restart counter-api
-   curl http://localhost:8080/index.html
-   ```
-3. **Backup & Restore**: Create a compressed volume snapshot:
-   ```bash
-   cairn backup create counter-data
-   cairn backup list counter-data
-   ```
-   Now corrupt the data:
-   ```bash
-   echo "Corrupted State B" > ~/.cairn/volumes/counter-data/index.html
-   curl http://localhost:8080/index.html
-   ```
-   Restore from the backup:
-   ```bash
-   cairn restore counter-data <backup_id>
-   curl http://localhost:8080/index.html
-   ```
+1. Write volume data under `~/.cairn/volumes/counter-data/`, curl again.
+2. `cairn restart counter-api` — data should persist.
+3. Backup / corrupt / restore:
+
+```bash
+cairn backup create counter-data
+cairn backup list counter-data
+echo "Corrupted" > ~/.cairn/volumes/counter-data/index.html
+cairn restore counter-data <backup_id>
+```
 
 ---
 
-## ⏪ Rollback safety (stateful deploys)
+## Rollback safety (stateful deploys)
 
-When a deploy runs a **`migration:`** step successfully, Cairn marks that deploy `state_touched=true`. Rolling back **across** such deploys is unsafe (schema/data may not match the older binary).
+When a deploy runs a **`migration:`** step successfully, Cairn marks `state_touched=true`. Rolling back **across** such deploys is blocked without `--force`.
 
 ```bash
-# After a migration deploy, rollback to an older deploy id without --force:
 cairn rollback counter-api --to <older_deploy_id>
-# → CLI prints ROLLBACK SAFETY WARNING (HTTP 409); current deploy unchanged
-# → cairn events shows RollbackBlocked
+# → HTTP 409 / ROLLBACK SAFETY WARNING; RollbackBlocked event
 
-# Only if you accept the risk:
 cairn rollback counter-api --to <older_deploy_id> --force
-# → RollbackForced event, then a new rollback deploy
+# → RollbackForced, then a new rollback deploy
 ```
 
-**Honest scope:** “unsafe” means intervening **migration** deploys, not every volume write. Pre-deploy volume backup still runs (and fails the deploy) when `migration:` is set.
-
-Live script (needs Mini-Docker + `cairnd`):
-
-```bash
-./scripts/rollback_safety_demo.sh          # block path
-FORCE=1 ./scripts/rollback_safety_demo.sh  # also force path
-```
+Live script: `./scripts/rollback_safety_demo.sh` (and `FORCE=1` for the force path).
 
 ---
 
-## 📊 Step 6: View Dashboard
+## Dashboard
 
-You can access the embedded web dashboard:
 ```bash
 cairn dashboard
+# http://127.0.0.1:2476/dashboard/
 ```
-This opens your system browser to `http://127.0.0.1:2476/dashboard/` where you can view daemon health, start/stop services, look at logs, manage backups, and view chronological audit events.
+
+---
+
+## Lab (optional, not Closeout A)
+
+FailForge / MiniDB / Coordination are **not** required for MLP closeout. See [STACK.md](STACK.md) tracks B/C and [roadmap.md](roadmap.md).

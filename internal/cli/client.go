@@ -35,7 +35,8 @@ func NewDaemonClient(socketPath string) *DaemonClient {
 func GetDefaultSocketPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		home = "/home/yumekaz"
+		// Never hardcode a username path; last-resort fallback for portability.
+		home = os.TempDir()
 	}
 	return filepath.Join(home, ".cairn", "cairnd.sock")
 }

@@ -246,6 +246,85 @@ func TestVolumesAndBackups(t *testing.T) {
 	}
 }
 
+func TestFailIncompleteBackups(t *testing.T) {
+	st, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	svcID := uuid.New().String()
+	if err := st.UpsertService(&api.Service{
+		ID: svcID, Name: "svc-fail-bak", Kind: "web", RuntimeBackend: "mini-docker",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertService: %v", err)
+	}
+	volID := uuid.New().String()
+	if err := st.UpsertVolume(&api.Volume{
+		ID: volID, Name: "vol-fail-bak", HostPath: "/tmp/vol-fail-bak",
+		AttachedServiceID: svcID, MountPath: "/data", Status: "active",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertVolume: %v", err)
+	}
+
+	pendingID := uuid.New().String()
+	if err := st.CreateBackup(&api.Backup{
+		ID: pendingID, VolumeID: volID, BackupPath: "/tmp/pending.tar.gz",
+		Status: "pending", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateBackup pending: %v", err)
+	}
+	okID := uuid.New().String()
+	if err := st.CreateBackup(&api.Backup{
+		ID: okID, VolumeID: volID, BackupPath: "/tmp/ok.tar.gz",
+		Status: "success", SizeBytes: 10, Checksum: "abc", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateBackup success: %v", err)
+	}
+
+	incomplete, err := st.ListIncompleteBackups()
+	if err != nil {
+		t.Fatalf("ListIncompleteBackups: %v", err)
+	}
+	if len(incomplete) != 1 || incomplete[0].ID != pendingID {
+		t.Fatalf("expected only pending incomplete, got %#v", incomplete)
+	}
+
+	n, err := st.FailIncompleteBackups("interrupted (daemon restart)")
+	if err != nil {
+		t.Fatalf("FailIncompleteBackups: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 row failed, got %d", n)
+	}
+
+	got, err := st.GetBackup(pendingID)
+	if err != nil || got == nil {
+		t.Fatalf("GetBackup pending: %v %#v", err, got)
+	}
+	if got.Status != "failed" {
+		t.Fatalf("expected failed, got %s", got.Status)
+	}
+	if got.FailureReason != "interrupted (daemon restart)" {
+		t.Fatalf("unexpected reason %q", got.FailureReason)
+	}
+	if got.CompletedAt == nil {
+		t.Fatal("expected completed_at set")
+	}
+
+	ok, err := st.GetBackup(okID)
+	if err != nil || ok == nil || ok.Status != "success" {
+		t.Fatalf("success backup must stay success: %#v err=%v", ok, err)
+	}
+
+	n2, err := st.FailIncompleteBackups("again")
+	if err != nil {
+		t.Fatalf("second FailIncompleteBackups: %v", err)
+	}
+	if n2 != 0 {
+		t.Fatalf("expected 0 rows on second pass, got %d", n2)
+	}
+}
+
 func TestEvents(t *testing.T) {
 	st, cleanup := setupTestStore(t)
 	defer cleanup()

@@ -432,6 +432,61 @@ func (s *Store) UpdateBackup(b *api.Backup) error {
 	return err
 }
 
+// ListIncompleteBackups returns backups that are not terminal (not success/failed).
+// These are left after a mid-backup process death and must be failed on recovery.
+func (s *Store) ListIncompleteBackups() ([]*api.Backup, error) {
+	rows, err := s.db.Query(`
+		SELECT id, volume_id, backup_path, status, size_bytes, checksum, created_at, completed_at, failure_reason
+		FROM backups
+		WHERE status NOT IN ('success', 'failed')
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var backups []*api.Backup
+	for rows.Next() {
+		var b api.Backup
+		var completedAt sql.NullTime
+		var failureReason sql.NullString
+
+		err := rows.Scan(&b.ID, &b.VolumeID, &b.BackupPath, &b.Status, &b.SizeBytes, &b.Checksum, &b.CreatedAt, &completedAt, &failureReason)
+		if err != nil {
+			return nil, err
+		}
+		if completedAt.Valid {
+			b.CompletedAt = &completedAt.Time
+		}
+		if failureReason.Valid {
+			b.FailureReason = failureReason.String
+		}
+		backups = append(backups, &b)
+	}
+	return backups, nil
+}
+
+// FailIncompleteBackups marks every non-terminal backup as failed.
+// Returns the number of rows updated. Safe to call on every daemon start.
+func (s *Store) FailIncompleteBackups(reason string) (int, error) {
+	if reason == "" {
+		reason = "interrupted (daemon restart)"
+	}
+	now := time.Now()
+	res, err := s.db.Exec(`
+		UPDATE backups
+		SET status = 'failed',
+		    completed_at = ?,
+		    failure_reason = ?
+		WHERE status NOT IN ('success', 'failed')`,
+		now, reason)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ListActiveDeployIDs returns all deploy IDs that are not completed (status != success and status != failed).
 func (s *Store) ListActiveDeployIDs() ([]string, error) {
 	rows, err := s.db.Query(`SELECT id FROM deploys WHERE status != 'success' AND status != 'failed'`)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/yumekaz/cairn/internal/api"
@@ -49,12 +50,14 @@ func DefaultConfig() *DaemonConfig {
 		}
 	}
 
-	// Determine Mini-Docker socket
-	miniDockerSocket := "/run/user/1000/mini-docker/mini-docker.sock"
-	if uid := os.Geteuid(); uid == 0 {
+	// Determine Mini-Docker socket (never assume uid 1000).
+	var miniDockerSocket string
+	if os.Geteuid() == 0 {
 		miniDockerSocket = "/var/run/mini-docker/mini-docker.sock"
 	} else if xdgRuntime := os.Getenv("XDG_RUNTIME_DIR"); xdgRuntime != "" {
 		miniDockerSocket = filepath.Join(xdgRuntime, "mini-docker", "mini-docker.sock")
+	} else {
+		miniDockerSocket = filepath.Join("/run/user", strconv.Itoa(os.Getuid()), "mini-docker", "mini-docker.sock")
 	}
 
 	return &DaemonConfig{

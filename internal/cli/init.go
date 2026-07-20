@@ -15,7 +15,8 @@ var initCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			homeDir = "/home/yumekaz"
+			// Never hardcode a username path; last-resort fallback for portability.
+			homeDir = os.TempDir()
 		}
 
 		cairnDir := filepath.Join(homeDir, ".cairn")
