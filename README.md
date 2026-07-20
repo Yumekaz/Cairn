@@ -10,6 +10,36 @@ Not multi-node. Not a cloud clone. Spine = **Cairn + Mini-Docker + DuraFlow**. L
 
 ---
 
+## Get running
+
+One path from zero (or a Cairn-only clone) to siblings + install + init + doctor:
+
+```bash
+git clone https://github.com/Yumekaz/Cairn.git
+cd Cairn
+./scripts/bootstrap_stack.sh --start-runtime   # needs sudo for Mini-Docker
+cairn doctor
+./scripts/prove_mlp.sh   # optional full proof
+```
+
+From an empty parent (clones all three siblings):
+
+```bash
+# after obtaining bootstrap_stack.sh (e.g. from a Cairn clone)
+./scripts/bootstrap_stack.sh --parent ~/src/cairn-stack --start-runtime
+```
+
+**Privileges / prerequisites**
+
+* **Linux only** (namespaces, OverlayFS, host-managed networking)
+* **sudo/root** to start Mini-Docker (passwordless `sudo -n`, or non-interactive `SUDO_PASSWORD` in the local shell — never commit passwords)
+* **Go 1.26+** (see `go.mod`) and **Python 3.10+**
+* Without privilege: run `./scripts/bootstrap_stack.sh` (no `--start-runtime`) — build/install still succeed; start Mini-Docker manually later
+
+See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) and [docs/quickstart.md](docs/quickstart.md).
+
+---
+
 ## Reliability claim (single-node MLP)
 
 **On one Linux host, Cairn deploys a stateful service on Mini-Docker, keeps a healthy release serving if a candidate fails or `cairnd` is killed mid-deploy, and you can re-run that proof locally.**
@@ -112,35 +142,39 @@ graph TD
 
 ## 🚀 Quickstart Installation
 
-**Sibling layout required** (DuraFlow is a local module replace, not a published version pin yet):
+**Preferred:** [Get running](#get-running) via `./scripts/bootstrap_stack.sh` (clones siblings, install, init, optional runtime).
+
+**Sibling layout** (DuraFlow is a local module replace, not a published version pin):
 
 ```text
 parent/
-  Cairn/          # this repo
-  DURAFLOW/       # git clone git@github.com:Yumekaz/DURAFLOW.git
-  Mini-Docker/    # git clone git@github.com:Yumekaz/Mini-Docker.git
+  Cairn/          # this repo (or SERVER checkout)
+  DURAFLOW/       # https://github.com/Yumekaz/DURAFLOW.git
+  Mini-Docker/    # https://github.com/Yumekaz/Mini-Docker.git
 ```
 
 Go `1.26.x` (see `go.mod`), Python `3.10+`, OverlayFS. Mini-Docker daemon needs root (or carefully configured rootless).
 
-### 1. Clone siblings + install
+### Manual path (advanced)
+
+#### 1. Clone siblings + install
 ```bash
 mkdir -p ~/src && cd ~/src
-git clone git@github.com:Yumekaz/Cairn.git
-git clone git@github.com:Yumekaz/DURAFLOW.git
-git clone git@github.com:Yumekaz/Mini-Docker.git
+git clone https://github.com/Yumekaz/Cairn.git
+git clone https://github.com/Yumekaz/DURAFLOW.git
+git clone https://github.com/Yumekaz/Mini-Docker.git
 cd Cairn
 ./scripts/install.sh
 ```
 
-### 2. Runtime env
+#### 2. Runtime env
 ```bash
 export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
 export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
 export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-### 3. Start Mini-Docker (single daemon)
+#### 3. Start Mini-Docker (single daemon)
 ```bash
 sudo mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")"
 sudo env PYTHONPATH="$PYTHONPATH" python3 -m mini_docker daemon \

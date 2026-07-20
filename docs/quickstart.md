@@ -4,6 +4,51 @@ Single-node Linux. Three sibling repos. No multi-node.
 
 ---
 
+## Preferred: bootstrap (one script)
+
+From a Cairn-only clone (or after any path that gives you this repo):
+
+```bash
+git clone https://github.com/Yumekaz/Cairn.git
+cd Cairn
+./scripts/bootstrap_stack.sh --start-runtime   # needs sudo for Mini-Docker
+cairn doctor
+./scripts/prove_mlp.sh   # optional full MLP proof
+```
+
+From an empty parent directory (clones **Cairn**, **DURAFLOW**, and **Mini-Docker**):
+
+```bash
+# copy or run from a Cairn checkout:
+./scripts/bootstrap_stack.sh --parent ~/src/cairn-stack --start-runtime
+```
+
+What the script does:
+
+1. Resolves parent + Cairn/SERVER root (keeps a `SERVER` checkout name if that is the repo)
+2. Clones missing siblings (HTTPS by default; `--ssh` for `git@`; remotes overridable via env)
+3. Ensures `go.mod` replace is `../DURAFLOW` (not an absolute `/home/...` path)
+4. Runs `./scripts/install.sh`
+5. Prints `CAIRN_ROOTFS`, `PYTHONPATH`, `MINI_DOCKER_SOCKET`
+6. `cairn init`
+7. With `--start-runtime` / `START_RUNTIME=1`: starts Mini-Docker + `cairnd` via `scripts/lib/runtime.sh` (root / `sudo -n` / `SUDO_PASSWORD` only — never hangs on interactive sudo)
+8. Runs `cairn doctor` when the runtime is available
+
+### Privileges
+
+| Need | Detail |
+| --- | --- |
+| OS | **Linux only** |
+| Mini-Docker | **sudo/root** for host-managed networking (daemon start) |
+| Non-interactive sudo | passwordless `sudo -n`, or `SUDO_PASSWORD` in the **local shell only** (never commit) |
+| Toolchain | **Go 1.26+**, **Python 3.10+**, OverlayFS |
+
+Without privilege, omit `--start-runtime`: install still succeeds; print the exact next commands for MD + cairnd + doctor.
+
+Shorter overview: [GETTING_STARTED.md](GETTING_STARTED.md).
+
+---
+
 ## Prerequisites
 
 1. **Go**: **1.26.x** (matches `go.mod`; older toolchains will not build this module).
@@ -17,15 +62,17 @@ sudo modprobe overlay
 
 ---
 
-## Stranger path (spine only)
+## Advanced: manual stranger path
+
+Use this if you prefer step-by-step control (or bootstrap is unavailable).
 
 ### 1. Three siblings + install
 
 ```bash
 mkdir -p ~/src && cd ~/src
-git clone git@github.com:Yumekaz/Cairn.git
-git clone git@github.com:Yumekaz/DURAFLOW.git
-git clone git@github.com:Yumekaz/Mini-Docker.git
+git clone https://github.com/Yumekaz/Cairn.git
+git clone https://github.com/Yumekaz/DURAFLOW.git
+git clone https://github.com/Yumekaz/Mini-Docker.git
 cd Cairn
 ./scripts/install.sh
 export PATH="$HOME/.local/bin:$PATH"
