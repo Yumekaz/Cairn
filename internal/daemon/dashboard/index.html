@@ -21,7 +21,10 @@
           <div class="stone s3"></div>
           <div class="stone s4"></div>
         </div>
-        <h1>CAIRN</h1>
+        <div class="brand-text">
+          <h1>CAIRN</h1>
+          <span class="brand-tag">admin</span>
+        </div>
       </div>
       <nav class="sidebar-nav" aria-label="Main">
         <a href="#/overview" class="nav-item active" id="nav-overview" aria-current="page">
@@ -79,11 +82,11 @@
             <span class="stat-value" id="stat-uptime">—</span>
           </div>
           <div class="header-stat">
-            <span class="stat-label">Active Services</span>
+            <span class="stat-label">Active</span>
             <span class="stat-value" id="stat-active">—</span>
           </div>
           <div class="header-stat">
-            <span class="stat-label">Storage Usage</span>
+            <span class="stat-label">Storage</span>
             <span class="stat-value" id="stat-storage">—</span>
           </div>
           <div class="header-stat">
@@ -97,90 +100,84 @@
       <section class="tab-panel" id="panel-overview" data-panel="overview">
         <div class="panel-error-banner hidden" id="overview-error" role="alert"></div>
 
-        <div class="metrics-grid">
-          <div class="glass-card metric-card">
-            <div class="card-icon blue">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="22" y2="7"/><line x1="2" y1="17" x2="22" y2="17"/></svg>
+        <div class="metrics-strip">
+          <div class="glass-card metric-cell">
+            <div class="metric-label">
+              <span class="metric-dot blue" aria-hidden="true"></span>
+              Services
             </div>
-            <div class="metric-info">
-              <h3>Services</h3>
-              <p class="metric-number" id="overview-services-count">—</p>
-              <p class="metric-desc">Registered deployments</p>
-            </div>
+            <p class="metric-number" id="overview-services-count">—</p>
+            <p class="metric-desc">Registered</p>
           </div>
-          <div class="glass-card metric-card">
-            <div class="card-icon green">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+          <div class="glass-card metric-cell">
+            <div class="metric-label">
+              <span class="metric-dot green" aria-hidden="true"></span>
+              Volumes
             </div>
-            <div class="metric-info">
-              <h3>Volumes</h3>
-              <p class="metric-number" id="overview-volumes-count">—</p>
-              <p class="metric-desc">Persistent state drives</p>
-            </div>
+            <p class="metric-number" id="overview-volumes-count">—</p>
+            <p class="metric-desc">Persistent</p>
           </div>
-          <div class="glass-card metric-card">
-            <div class="card-icon purple">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <div class="glass-card metric-cell">
+            <div class="metric-label">
+              <span class="metric-dot purple" aria-hidden="true"></span>
+              Backups
             </div>
-            <div class="metric-info">
-              <h3>Backups</h3>
-              <p class="metric-number" id="overview-backups-count">—</p>
-              <p class="metric-desc">Volume snapshot archives</p>
-            </div>
+            <p class="metric-number" id="overview-backups-count">—</p>
+            <p class="metric-desc">Snapshots</p>
           </div>
-          <div class="glass-card metric-card">
-            <div class="card-icon orange">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+          <div class="glass-card metric-cell">
+            <div class="metric-label">
+              <span class="metric-dot orange" aria-hidden="true"></span>
+              Daemon
             </div>
-            <div class="metric-info">
-              <h3>Daemon</h3>
-              <p class="metric-number" id="overview-uptime-text">—</p>
-              <p class="metric-desc">Liveness from /status</p>
-            </div>
+            <p class="metric-number metric-status" id="overview-uptime-text">—</p>
+            <p class="metric-desc">Liveness</p>
           </div>
         </div>
 
-        <div class="overview-layout">
-          <div class="glass-card grid-col-2">
-            <div class="card-header">
-              <h3>Recent Services</h3>
-              <a href="#/services" class="btn-link">View All →</a>
+        <div class="overview-body">
+          <div class="overview-layout">
+            <div class="glass-card panel-card">
+              <div class="card-header">
+                <h3>Recent Services</h3>
+                <a href="#/services" class="btn-link">View All →</a>
+              </div>
+              <div class="table-container scroll-pane">
+                <table class="data-table services-table" id="table-recent-services">
+                  <colgroup>
+                    <col class="col-name">
+                    <col class="col-kind">
+                    <col class="col-state">
+                    <col class="col-route">
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th scope="col">Service Name</th>
+                      <th scope="col">Kind</th>
+                      <th scope="col">Actual State</th>
+                      <th scope="col">Endpoints</th>
+                    </tr>
+                  </thead>
+                  <tbody id="recent-services-body">
+                    <tr class="skeleton-row">
+                      <td colspan="4"><div class="skeleton skeleton-line"></div></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div class="table-container">
-              <table class="data-table services-table" id="table-recent-services">
-                <colgroup>
-                  <col class="col-name">
-                  <col class="col-kind">
-                  <col class="col-state">
-                  <col class="col-route">
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th scope="col">Service Name</th>
-                    <th scope="col">Kind</th>
-                    <th scope="col">Actual State</th>
-                    <th scope="col">Endpoints</th>
-                  </tr>
-                </thead>
-                <tbody id="recent-services-body">
-                  <tr class="skeleton-row">
-                    <td colspan="4"><div class="skeleton skeleton-line"></div></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
 
-          <div class="glass-card">
-            <div class="card-header">
-              <h3>Recent System Events</h3>
-              <a href="#/events" class="btn-link">View Audit →</a>
-            </div>
-            <div class="recent-events-list" id="overview-events-list">
-              <div class="skeleton-stack" aria-hidden="true">
-                <div class="skeleton skeleton-line"></div>
-                <div class="skeleton skeleton-line short"></div>
-                <div class="skeleton skeleton-line"></div>
+            <div class="glass-card panel-card">
+              <div class="card-header">
+                <h3>Recent System Events</h3>
+                <a href="#/events" class="btn-link">View Audit →</a>
+              </div>
+              <div class="recent-events-list scroll-pane" id="overview-events-list">
+                <div class="skeleton-stack" aria-hidden="true">
+                  <div class="skeleton skeleton-line"></div>
+                  <div class="skeleton skeleton-line short"></div>
+                  <div class="skeleton skeleton-line"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -190,7 +187,7 @@
       <section class="tab-panel hidden" id="panel-services" data-panel="services">
         <div class="panel-error-banner hidden" id="services-error" role="alert"></div>
 
-        <div class="action-bar mb-4">
+        <div class="action-bar">
           <div class="search-box">
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input type="search" id="input-search-services" placeholder="Filter services by name or kind..." autocomplete="off" spellcheck="false">
@@ -198,7 +195,7 @@
           <span class="result-count text-muted" id="services-count-label"></span>
         </div>
 
-        <div class="services-list-grid" id="services-container">
+        <div class="services-list-grid scroll-pane" id="services-container">
           <div class="glass-card service-card skeleton-card" aria-hidden="true">
             <div class="skeleton skeleton-line"></div>
             <div class="skeleton skeleton-line short"></div>
@@ -221,11 +218,11 @@
         <div class="panel-error-banner hidden" id="volumes-error" role="alert"></div>
 
         <div class="volumes-grid">
-          <div class="glass-card volumes-list-card">
+          <div class="glass-card panel-card volumes-list-card">
             <div class="card-header">
               <h3>Persistent Volumes</h3>
             </div>
-            <div class="table-container">
+            <div class="table-container scroll-pane">
               <table class="data-table volumes-table" id="table-volumes">
                 <colgroup>
                   <col class="col-vol-name">
@@ -252,18 +249,18 @@
             </div>
           </div>
 
-          <div class="glass-card" id="backup-inspector-card">
+          <div class="glass-card panel-card" id="backup-inspector-card">
             <div class="card-header">
               <div>
                 <h3>Backups</h3>
                 <p class="card-subtitle text-muted" id="backup-subtitle">Select a volume to view backups</p>
               </div>
               <button type="button" class="btn btn-primary btn-sm hidden needs-online" id="btn-create-backup" disabled>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right:4px;" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px;" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                 Backup Now
               </button>
             </div>
-            <div class="backups-list-container" id="backups-list-body">
+            <div class="backups-list-container scroll-pane" id="backups-list-body">
               <div class="empty-state">
                 <p class="empty-title">No volume selected</p>
                 <p class="text-muted">Choose a volume on the left to inspect snapshots and restore points.</p>
@@ -276,7 +273,7 @@
       <section class="tab-panel hidden" id="panel-events" data-panel="events">
         <div class="panel-error-banner hidden" id="events-error" role="alert"></div>
 
-        <div class="glass-card">
+        <div class="glass-card panel-card events-panel-card">
           <div class="card-header events-header">
             <div>
               <h3>System Event Log</h3>
@@ -294,12 +291,12 @@
                 Auto-scroll
               </label>
               <button type="button" class="btn btn-secondary btn-sm needs-online" id="btn-refresh-events">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right:4px;" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px;" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                 Refresh
               </button>
             </div>
           </div>
-          <div class="timeline-container" id="timeline-events-body" tabindex="0">
+          <div class="timeline-container scroll-pane" id="timeline-events-body" tabindex="0">
             <div class="skeleton-stack py-4" aria-hidden="true">
               <div class="skeleton skeleton-line"></div>
               <div class="skeleton skeleton-line short"></div>
