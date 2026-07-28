@@ -1,485 +1,912 @@
-/* Cairn Dashboard client JS application */
+/* Cairn Dashboard — single-node local admin console (vanilla JS) */
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Navigation & Router
+  // ---------------------------------------------------------------------------
+  // DOM refs
+  // ---------------------------------------------------------------------------
   const navItems = document.querySelectorAll('.nav-item');
   const panels = document.querySelectorAll('.tab-panel');
   const pageTitle = document.getElementById('page-title');
   const pageSubtitle = document.getElementById('page-subtitle');
-  
-  // Cache data
-  let servicesCache = [];
-  let selectedVolumeName = null;
-  let activePollingInterval = null;
 
-  // Router matching hash changes
+  // ---------------------------------------------------------------------------
+  // App state
+  // ---------------------------------------------------------------------------
+  let servicesCache = [];
+  let eventsCache = [];
+  let selectedVolumeName = null;
+  let currentRoute = '';
+  let activeServiceName = null;
+  let activeLogsInterval = null;
+  let lastLogsText = '';
+  let currentConfirmCallback = null;
+
+  // Connection / refresh
+  let isOnline = false;
+  let reconnectAttempts = 0;
+  let statusTimer = null;
+  let panelRefreshTimer = null;
+  let statusInFlight = false;
+  let panelRefreshInFlight = false;
+  let lastSuccessfulSync = null;
+
+  const STATUS_BASE_MS = 5000;
+  const STATUS_MAX_BACKOFF_MS = 30000;
+  const PANEL_REFRESH_MS = 8000;
+  const LOGS_POLL_MS = 3000;
+
+  // ---------------------------------------------------------------------------
+  // Connection status (truthful: green only when /status succeeds)
+  // ---------------------------------------------------------------------------
+  function setConnectionState(online, message, detail, opts) {
+    const wasOnline = isOnline;
+    isOnline = online;
+    opts = opts || {};
+
+    const ind = document.getElementById('status-indicator');
+    const text = document.getElementById('daemon-connection-text');
+    const detailEl = document.getElementById('daemon-connection-detail');
+    const banner = document.getElementById('global-banner');
+    const bannerText = document.getElementById('global-banner-text');
+    const statusWrap = document.getElementById('connection-status');
+
+    if (online) {
+      ind.className = 'status-indicator online';
+      text.textContent = message || 'Connected';
+      detailEl.textContent = detail || '';
+      banner.classList.add('hidden');
+      statusWrap.classList.remove('is-offline');
+      document.body.classList.remove('daemon-offline');
+    } else {
+      ind.className = 'status-indicator offline';
+      text.textContent = message || 'Disconnected';
+      detailEl.textContent = detail || '';
+      bannerText.textContent = detail
+        ? `Daemon unreachable — ${detail}`
+        : 'Daemon unreachable. Actions are disabled until connection is restored.';
+      banner.classList.remove('hidden');
+      statusWrap.classList.add('is-offline');
+      document.body.classList.add('daemon-offline');
+    }
+
+    // Enable / disable mutation actions
+    document.querySelectorAll('.needs-online').forEach((el) => {
+      if (online) {
+        if (el.dataset.busy !== '1') el.disabled = false;
+      } else {
+        el.disabled = true;
+      }
+    });
+
+    const uptimeHealth = document.getElementById('overview-uptime-text');
+    if (uptimeHealth) {
+      uptimeHealth.textContent = online ? 'Healthy' : 'Unreachable';
+      uptimeHealth.classList.toggle('text-danger', !online);
+    }
+
+    if (wasOnline !== online && !online) {
+      showToast('Lost connection to cairnd', 'error');
+    } else if (wasOnline !== online && online && opts.reconnected) {
+      showToast('Reconnected to cairnd', 'success');
+      if (activeServiceName) {
+        const svc = servicesCache.find((x) => x.name === activeServiceName);
+        setupServiceActions(activeServiceName, svc && svc.actual_state);
+      }
+    }
+  }
+
+  function updateLastUpdated(ts) {
+    lastSuccessfulSync = ts || new Date();
+    const el = document.getElementById('last-updated-value');
+    if (!el) return;
+    el.textContent = formatClock(lastSuccessfulSync);
+    el.title = lastSuccessfulSync.toISOString();
+  }
+
+  function nextStatusDelay() {
+    if (isOnline) return STATUS_BASE_MS;
+    const exp = Math.min(STATUS_MAX_BACKOFF_MS, STATUS_BASE_MS * Math.pow(2, reconnectAttempts));
+    // Jitter ±20%
+    return Math.round(exp * (0.8 + Math.random() * 0.4));
+  }
+
+  function scheduleStatusPoll(delay) {
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = null;
+    if (document.hidden) return;
+    statusTimer = setTimeout(pollDaemonStatus, delay);
+  }
+
+  async function pollDaemonStatus() {
+    if (statusInFlight) {
+      scheduleStatusPoll(STATUS_BASE_MS);
+      return;
+    }
+    statusInFlight = true;
+    try {
+      const res = await fetch('/status', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      document.getElementById('stat-uptime').textContent = data.uptime ?? '—';
+      document.getElementById('stat-active').textContent =
+        data.active_services != null ? String(data.active_services) : '—';
+      document.getElementById('stat-storage').textContent = data.storage_usage ?? '—';
+      document.getElementById('stat-version').textContent = data.version ?? '—';
+
+      const wasOffline = !isOnline;
+      const priorAttempts = reconnectAttempts;
+      reconnectAttempts = 0;
+      setConnectionState(true, 'Connected', data.version ? `v${data.version}` : '', {
+        reconnected: wasOffline && priorAttempts > 0,
+      });
+      updateLastUpdated();
+
+      // If we just came back online, refresh the active panel immediately
+      if (wasOffline) {
+        refreshActivePanel(true);
+      }
+    } catch (err) {
+      reconnectAttempts += 1;
+      const delay = nextStatusDelay();
+      const secs = Math.round(delay / 1000);
+      setConnectionState(
+        false,
+        'Disconnected',
+        err.message || 'fetch failed' + ` · retry in ${secs}s`
+      );
+      // Still schedule with backoff; fall through to scheduleStatusPoll below with backoff
+      statusInFlight = false;
+      scheduleStatusPoll(delay);
+      return;
+    }
+    statusInFlight = false;
+    scheduleStatusPoll(STATUS_BASE_MS);
+  }
+
+  document.getElementById('btn-retry-connection').addEventListener('click', () => {
+    reconnectAttempts = 0;
+    const ind = document.getElementById('status-indicator');
+    ind.className = 'status-indicator connecting';
+    document.getElementById('daemon-connection-text').textContent = 'Connecting…';
+    pollDaemonStatus();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Panel refresh loop (staggered with status; only active route)
+  // ---------------------------------------------------------------------------
+  function schedulePanelRefresh() {
+    if (panelRefreshTimer) clearTimeout(panelRefreshTimer);
+    panelRefreshTimer = null;
+    if (document.hidden) return;
+    panelRefreshTimer = setTimeout(() => {
+      refreshActivePanel(false).finally(() => schedulePanelRefresh());
+    }, PANEL_REFRESH_MS);
+  }
+
+  // Pause status/panel polls while tab is hidden; resume with immediate refresh
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (statusTimer) {
+        clearTimeout(statusTimer);
+        statusTimer = null;
+      }
+      if (panelRefreshTimer) {
+        clearTimeout(panelRefreshTimer);
+        panelRefreshTimer = null;
+      }
+      return;
+    }
+    pollDaemonStatus();
+    refreshActivePanel(true);
+    schedulePanelRefresh();
+  });
+
+  async function refreshActivePanel(force) {
+    if (panelRefreshInFlight && !force) return;
+    if (!isOnline && !force) return;
+    panelRefreshInFlight = true;
+    try {
+      switch (currentRoute) {
+        case '#/overview':
+          await loadOverviewData({ silent: !force });
+          break;
+        case '#/services':
+          await loadServicesData({ silent: !force });
+          break;
+        case '#/volumes':
+          await loadVolumesData({ silent: !force });
+          break;
+        case '#/events':
+          await loadEventsTimeline({ silent: !force });
+          break;
+        default:
+          break;
+      }
+    } catch (e) {
+      /* loaders surface their own errors */
+    } finally {
+      panelRefreshInFlight = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Router
+  // ---------------------------------------------------------------------------
+  function setActiveNav(navId) {
+    navItems.forEach((nav) => {
+      nav.classList.remove('active');
+      nav.removeAttribute('aria-current');
+    });
+    const el = document.getElementById(navId);
+    if (el) {
+      el.classList.add('active');
+      el.setAttribute('aria-current', 'page');
+    }
+  }
+
   function handleRoute() {
     const hash = window.location.hash || '#/overview';
-    
-    // Deactivate current nav and panel
-    navItems.forEach(nav => nav.classList.remove('active'));
-    panels.forEach(panel => panel.classList.add('hidden'));
+    const prev = currentRoute;
+    currentRoute = hash;
 
-    // Reset details if needed
-    if (hash !== '#/volumes') {
-      selectedVolumeName = null;
-      document.getElementById('backup-inspector-card').classList.add('hidden');
-    }
+    panels.forEach((panel) => panel.classList.add('hidden'));
 
     if (hash === '#/overview') {
-      document.getElementById('nav-overview').classList.add('active');
-      document.getElementById('panel-overview').classList.remove('hidden');
+      setActiveNav('nav-overview');
+      showPanel('panel-overview');
       pageTitle.textContent = 'Overview';
-      pageSubtitle.textContent = 'Control plane metrics and cluster status';
-      loadOverviewData();
+      pageSubtitle.textContent = 'Control plane metrics for this Cairn node';
+      loadOverviewData({ silent: prev === hash });
     } else if (hash === '#/services') {
-      document.getElementById('nav-services').classList.add('active');
-      document.getElementById('panel-services').classList.remove('hidden');
+      setActiveNav('nav-services');
+      showPanel('panel-services');
       pageTitle.textContent = 'Services';
-      pageSubtitle.textContent = 'Run, scale, and monitor active service deployments';
-      loadServicesData();
+      pageSubtitle.textContent = 'Run, inspect, and manage service deployments';
+      loadServicesData({ silent: prev === hash });
     } else if (hash === '#/volumes') {
-      document.getElementById('nav-volumes').classList.add('active');
-      document.getElementById('panel-volumes').classList.remove('hidden');
+      setActiveNav('nav-volumes');
+      showPanel('panel-volumes');
       pageTitle.textContent = 'Volumes & Backups';
-      pageSubtitle.textContent = 'Persistent state partitions and logical database snapshots';
-      loadVolumesData();
+      pageSubtitle.textContent = 'Persistent state partitions and volume snapshots';
+      loadVolumesData({ silent: prev === hash });
     } else if (hash === '#/events') {
-      document.getElementById('nav-events').classList.add('active');
-      document.getElementById('panel-events').classList.remove('hidden');
+      setActiveNav('nav-events');
+      showPanel('panel-events');
       pageTitle.textContent = 'Events Timeline';
-      pageSubtitle.textContent = 'Audit log timeline of daemon state changes and deployments';
-      loadEventsTimeline();
+      pageSubtitle.textContent = 'Audit log of daemon state changes and deployments';
+      loadEventsTimeline({ silent: prev === hash });
+    } else {
+      window.location.hash = '#/overview';
     }
+  }
+
+  function showPanel(id) {
+    const panel = document.getElementById(id);
+    panel.classList.remove('hidden');
+    // Retrigger enter animation
+    panel.classList.remove('panel-enter');
+    // Force reflow
+    void panel.offsetWidth;
+    panel.classList.add('panel-enter');
   }
 
   window.addEventListener('hashchange', handleRoute);
 
-  // Status Polling Loop
-  async function pollDaemonStatus() {
-    try {
-      const res = await fetch('/status');
-      if (!res.ok) throw new Error('Daemon status failed');
-      const data = await res.json();
-      
-      // Update header widgets
-      document.getElementById('stat-uptime').textContent = data.uptime;
-      document.getElementById('stat-active').textContent = data.active_services;
-      document.getElementById('stat-storage').textContent = data.storage_usage;
-      document.getElementById('stat-version').textContent = data.version;
-
-      // Sidebar connection
-      const ind = document.querySelector('.status-indicator');
-      ind.className = 'status-indicator online';
-      document.getElementById('daemon-connection-text').textContent = 'Connected';
-    } catch (err) {
-      console.error('Connection to cairnd lost:', err);
-      const ind = document.querySelector('.status-indicator');
-      ind.className = 'status-indicator offline';
-      document.getElementById('daemon-connection-text').textContent = 'Disconnected';
-    }
-  }
-
-  // Initial daemon stats call
-  pollDaemonStatus();
-  // Poll every 5 seconds
-  activePollingInterval = setInterval(pollDaemonStatus, 5000);
-
-  // API Call Wrapper
+  // ---------------------------------------------------------------------------
+  // API helpers
+  // ---------------------------------------------------------------------------
   async function apiCall(url, method = 'GET', body = null) {
-    const options = { method };
+    const options = { method, cache: 'no-store' };
     if (body) {
       options.headers = { 'Content-Type': 'application/json' };
       options.body = JSON.stringify(body);
     }
     const res = await fetch(url, options);
-    
+
     if (res.status === 409) {
-      // Return a special conflict status for safety prompt
-      const data = await res.json();
-      return { conflict: true, status: 409, message: data.error };
+      const data = await res.json().catch(() => ({}));
+      return { conflict: true, status: 409, message: data.error || 'Conflict' };
     }
-    
+
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `HTTP error ${res.status}`);
     }
-    
+
     if (res.status === 204) return null;
-    return await res.json();
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) return await res.json();
+    return await res.text();
   }
 
-  // OVERVIEW PANELS
-  async function loadOverviewData() {
+  function setPanelError(id, message) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!message) {
+      el.classList.add('hidden');
+      el.textContent = '';
+      return;
+    }
+    el.textContent = message;
+    el.classList.remove('hidden');
+  }
+
+  // ---------------------------------------------------------------------------
+  // OVERVIEW
+  // ---------------------------------------------------------------------------
+  async function loadOverviewData({ silent } = {}) {
+    const tbody = document.getElementById('recent-services-body');
+    const evList = document.getElementById('overview-events-list');
+
+    if (!silent) {
+      tbody.innerHTML = skeletonTableRows(4, 4);
+      evList.innerHTML = skeletonStackHtml(3);
+    }
+
     try {
-      let [services, events] = await Promise.all([
+      let [services, events, volumes] = await Promise.all([
         apiCall('/services'),
-        apiCall('/events')
+        apiCall('/events'),
+        apiCall('/volumes'),
       ]);
       services = services || [];
       events = events || [];
-
-      // Update counters
-      document.getElementById('overview-services-count').textContent = services.length;
-      
-      // Volumes counter calculation
-      let volCount = 0;
-      services.forEach(s => {
-        // we can fetch volumes list separately if needed, but let's query volumes directly
-      });
-      let volumes = await apiCall('/volumes');
       volumes = volumes || [];
-      document.getElementById('overview-volumes-count').textContent = volumes.length;
+      servicesCache = services;
+      eventsCache = events;
 
-      // Backups count total
+      document.getElementById('overview-services-count').textContent = String(services.length);
+      document.getElementById('overview-volumes-count').textContent = String(volumes.length);
+
+      // Backups: sample in parallel, cap concurrent volume backup lists
       let totalBackups = 0;
-      for (const vol of volumes) {
-        try {
-          let backups = await apiCall(`/volumes/${vol.name}/backups`);
-          backups = backups || [];
-          totalBackups += backups.length;
-        } catch (e) {}
-      }
-      document.getElementById('overview-backups-count').textContent = totalBackups;
+      const backupResults = await Promise.all(
+        volumes.map((vol) =>
+          apiCall(`/volumes/${encodeURIComponent(vol.name)}/backups`).catch(() => [])
+        )
+      );
+      backupResults.forEach((b) => {
+        totalBackups += (b || []).length;
+      });
+      document.getElementById('overview-backups-count').textContent = String(totalBackups);
 
-      // Render Recent Services
-      const tbody = document.querySelector('#table-recent-services tbody');
+      const healthEl = document.getElementById('overview-uptime-text');
+      healthEl.textContent = isOnline ? 'Healthy' : 'Unreachable';
+      healthEl.classList.toggle('text-danger', !isOnline);
+
+      // Recent services — stable columns, ellipsis cells
       tbody.innerHTML = '';
       if (services.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="text-center">No services deployed yet.</td></tr>`;
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="4">
+              <div class="empty-state compact">
+                <p class="empty-title">No services yet</p>
+                <p class="text-muted">Deploy a service with the Cairn CLI to see it here.</p>
+              </div>
+            </td>
+          </tr>`;
       } else {
-        services.slice(0, 5).forEach(s => {
+        services.slice(0, 5).forEach((s) => {
           const tr = document.createElement('tr');
           const name = escapeHtml(s.name || '');
           const kind = escapeHtml(s.kind || 'unknown');
           const state = escapeHtml(s.actual_state || 'unknown');
           const route = escapeHtml(s.route || 'N/A');
+          const stateClass = sanitizeBadgeClass(s.actual_state);
           tr.innerHTML = `
             <td><span class="font-bold service-name-cell" title="${name}">${name}</span></td>
             <td><span class="badge badge-kind">${kind}</span></td>
-            <td><span class="badge ${state}">${state}</span></td>
-            <td><span class="text-mono route-cell" title="${route}">${route}</span></td>
-          `;
+            <td><span class="badge ${stateClass}">${state}</span></td>
+            <td><span class="text-mono route-cell" title="${route}">${route}</span></td>`;
           tr.style.cursor = 'pointer';
           tr.addEventListener('click', () => showServiceDetail(s.name));
           tbody.appendChild(tr);
         });
       }
 
-      // Render Recent Events
-      const evList = document.getElementById('overview-events-list');
+      // Recent events
       evList.innerHTML = '';
       if (events.length === 0) {
-        evList.innerHTML = `<p class="text-muted text-center py-4">No recent events registered.</p>`;
+        evList.innerHTML = `
+          <div class="empty-state compact">
+            <p class="empty-title">No recent events</p>
+            <p class="text-muted">Daemon activity will appear here.</p>
+          </div>`;
       } else {
-        events.slice(0, 5).forEach(e => {
+        events.slice(0, 6).forEach((e) => {
           const div = document.createElement('div');
-          const typeClass = e.type.toLowerCase();
-          div.className = `recent-event-item ${typeClass.includes('deploy') ? 'deploy' : typeClass.includes('backup') ? 'backup' : typeClass.includes('restore') ? 'restore' : typeClass.includes('crash') ? 'crash' : ''}`;
+          div.className = `recent-event-item ${eventTypeClass(e.type)}`;
           div.innerHTML = `
-            <span class="event-time">${formatTime(e.created_at)}</span>
-            <span class="event-msg"><strong>[${e.type}]</strong> ${e.message}</span>
-          `;
+            <span class="event-time">${escapeHtml(formatTime(e.created_at))}</span>
+            <span class="event-msg"><strong class="event-type">[${escapeHtml(e.type || '')}]</strong> ${escapeHtml(e.message || '')}</span>`;
           evList.appendChild(div);
         });
       }
+
+      setPanelError('overview-error', null);
+      updateLastUpdated();
     } catch (err) {
       console.error('Error loading overview data:', err);
+      setPanelError('overview-error', `Failed to load overview: ${err.message}`);
+      if (!silent) {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center text-danger">Failed to load services</td></tr>`;
+        evList.innerHTML = `<p class="text-danger text-center py-4">Failed to load events</p>`;
+      }
     }
   }
 
-  // SERVICES TAB
-  async function loadServicesData() {
+  // ---------------------------------------------------------------------------
+  // SERVICES
+  // ---------------------------------------------------------------------------
+  async function loadServicesData({ silent } = {}) {
     const container = document.getElementById('services-container');
-    const searchVal = document.getElementById('input-search-services').value.toLowerCase();
-    
+    const searchVal = (document.getElementById('input-search-services').value || '').toLowerCase();
+    const countLabel = document.getElementById('services-count-label');
+
+    if (!silent) {
+      container.innerHTML = skeletonServiceCards(3);
+    }
+
     try {
       let services = await apiCall('/services');
       services = services || [];
       servicesCache = services;
-      
+
+      const filtered = services.filter((s) => {
+        const n = (s.name || '').toLowerCase();
+        const k = (s.kind || '').toLowerCase();
+        return n.includes(searchVal) || k.includes(searchVal);
+      });
+
+      countLabel.textContent =
+        services.length === 0
+          ? ''
+          : searchVal
+            ? `${filtered.length} of ${services.length}`
+            : `${services.length} service${services.length === 1 ? '' : 's'}`;
+
       container.innerHTML = '';
-      const filtered = services.filter(s => s.name.toLowerCase().includes(searchVal) || s.kind.toLowerCase().includes(searchVal));
 
       if (filtered.length === 0) {
         container.innerHTML = `
-          <div class="glass-card text-center py-5" style="grid-column: 1/-1;">
-            <p class="text-muted">No services found matching the criteria.</p>
-          </div>
-        `;
+          <div class="glass-card empty-state-card" style="grid-column: 1/-1;">
+            <div class="empty-state">
+              <p class="empty-title">${services.length === 0 ? 'No services deployed' : 'No matches'}</p>
+              <p class="text-muted">${
+                services.length === 0
+                  ? 'Register a deployment with the Cairn CLI. This dashboard is read/manage only for existing services.'
+                  : 'Try a different name or kind filter.'
+              }</p>
+            </div>
+          </div>`;
+        setPanelError('services-error', null);
+        updateLastUpdated();
         return;
       }
 
-      filtered.forEach(s => {
+      filtered.forEach((s) => {
         const card = document.createElement('div');
         card.className = 'glass-card service-card';
+        const name = escapeHtml(s.name || '');
+        const idShort = escapeHtml((s.id || '').slice(0, 8) || '—');
+        const kind = escapeHtml(s.kind || 'unknown');
+        const state = escapeHtml(s.actual_state || 'unknown');
+        const stateClass = sanitizeBadgeClass(s.actual_state);
+        const route = escapeHtml(s.route || 'N/A');
         card.innerHTML = `
           <div class="service-card-header">
             <div class="service-card-title">
-              <h3>${s.name}</h3>
-              <p>${s.id.slice(0, 8)}</p>
+              <h3 title="${name}">${name}</h3>
+              <p class="text-mono">${idShort}</p>
             </div>
-            <span class="badge ${s.actual_state}">${s.actual_state}</span>
+            <span class="badge ${stateClass}">${state}</span>
           </div>
           <div class="service-info-row">
-            <span class="service-info-label">Kind:</span>
-            <span>${s.kind}</span>
+            <span class="service-info-label">Kind</span>
+            <span>${kind}</span>
           </div>
           <div class="service-info-row">
-            <span class="service-info-label">Route:</span>
-            <span class="text-mono">${s.route || 'N/A'}</span>
+            <span class="service-info-label">Route</span>
+            <span class="text-mono route-cell" title="${route}">${route}</span>
           </div>
           <div class="service-card-footer">
-            <button class="btn btn-secondary btn-sm" id="btn-inspect-${s.name}">Inspect Details</button>
-          </div>
-        `;
-        
-        card.querySelector(`#btn-inspect-${s.name}`).addEventListener('click', () => showServiceDetail(s.name));
+            <button type="button" class="btn btn-secondary btn-sm btn-inspect">Inspect</button>
+          </div>`;
+        card.querySelector('.btn-inspect').addEventListener('click', () => showServiceDetail(s.name));
         container.appendChild(card);
       });
+
+      setPanelError('services-error', null);
+      updateLastUpdated();
     } catch (err) {
       console.error('Failed to load services:', err);
-      container.innerHTML = `<div class="glass-card text-center py-4" style="grid-column: 1/-1;"><p class="text-danger">Failed to load services: ${err.message}</p></div>`;
+      setPanelError('services-error', `Failed to load services: ${err.message}`);
+      if (!silent) {
+        container.innerHTML = `
+          <div class="glass-card empty-state-card" style="grid-column: 1/-1;">
+            <div class="empty-state">
+              <p class="empty-title text-danger">Could not load services</p>
+              <p class="text-muted">${escapeHtml(err.message)}</p>
+            </div>
+          </div>`;
+      }
     }
   }
 
-  // Service search listener
-  document.getElementById('input-search-services').addEventListener('input', loadServicesData);
+  let searchDebounce = null;
+  document.getElementById('input-search-services').addEventListener('input', () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => loadServicesData({ silent: true }), 150);
+  });
 
-  // SERVICE DETAILS DRAWER/MODAL
-  let activeLogsInterval = null;
+  // ---------------------------------------------------------------------------
+  // Modal focus trap (Tab cycle, Escape, restore opener)
+  // ---------------------------------------------------------------------------
+  const FOCUSABLE_SEL =
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  /** @type {{ modal: HTMLElement, returnTo: Element | null }[]} */
+  const modalFocusStack = [];
 
+  function isFocusableVisible(el) {
+    if (el.disabled || el.getAttribute('aria-hidden') === 'true') return false;
+    if (el.closest('.hidden')) return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
+  function getFocusable(container) {
+    return Array.from(container.querySelectorAll(FOCUSABLE_SEL)).filter(isFocusableVisible);
+  }
+
+  function getTopModal() {
+    const confirm = document.getElementById('modal-confirm-action');
+    const service = document.getElementById('modal-service-detail');
+    if (confirm && !confirm.classList.contains('hidden')) return confirm;
+    if (service && !service.classList.contains('hidden')) return service;
+    return null;
+  }
+
+  function activateModalTrap(modal) {
+    modalFocusStack.push({
+      modal,
+      returnTo: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    });
+    modal.classList.remove('hidden');
+    requestAnimationFrame(() => {
+      const focusables = getFocusable(modal);
+      if (focusables.length) focusables[0].focus();
+      else if (modal.tabIndex < 0) {
+        modal.tabIndex = -1;
+        modal.focus();
+      }
+    });
+  }
+
+  function deactivateModalTrap(modal) {
+    modal.classList.add('hidden');
+    let returnTo = null;
+    for (let i = modalFocusStack.length - 1; i >= 0; i--) {
+      if (modalFocusStack[i].modal === modal) {
+        returnTo = modalFocusStack[i].returnTo;
+        modalFocusStack.splice(i, 1);
+        break;
+      }
+    }
+    if (returnTo && typeof returnTo.focus === 'function' && document.contains(returnTo)) {
+      returnTo.focus();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SERVICE DETAIL
+  // ---------------------------------------------------------------------------
   async function showServiceDetail(serviceName) {
     const modal = document.getElementById('modal-service-detail');
-    modal.classList.remove('hidden');
+    activateModalTrap(modal);
+    activeServiceName = serviceName;
+    lastLogsText = '';
 
-    // Clean active intervals
-    if (activeLogsInterval) clearInterval(activeLogsInterval);
+    if (activeLogsInterval) {
+      clearInterval(activeLogsInterval);
+      activeLogsInterval = null;
+    }
+
+    document.getElementById('detail-service-name').textContent = serviceName;
+    document.getElementById('detail-service-status').textContent = '…';
+    document.getElementById('detail-service-status').className = 'badge';
+    document.getElementById('service-logs-console').innerHTML =
+      '<div class="log-line text-muted">Loading logs…</div>';
+    document.getElementById('detail-deploys-list').innerHTML =
+      '<p class="text-muted">Loading history…</p>';
+    document.getElementById('lifecycle-hint').textContent = '';
 
     try {
-      const s = await apiCall(`/services/${serviceName}`);
-      
+      const s = await apiCall(`/services/${encodeURIComponent(serviceName)}`);
+
       document.getElementById('detail-service-name').textContent = s.name;
       const statusBadge = document.getElementById('detail-service-status');
-      statusBadge.textContent = s.actual_state;
-      statusBadge.className = `badge ${s.actual_state}`;
+      statusBadge.textContent = s.actual_state || 'unknown';
+      statusBadge.className = `badge ${sanitizeBadgeClass(s.actual_state)}`;
 
-      document.getElementById('detail-service-id').textContent = s.id;
-      document.getElementById('detail-service-kind').textContent = s.kind;
-      document.getElementById('detail-service-runtime').textContent = s.runtime_backend;
+      document.getElementById('detail-service-id').textContent = s.id || '—';
+      document.getElementById('detail-service-kind').textContent = s.kind || '—';
+      document.getElementById('detail-service-runtime').textContent = s.runtime_backend || '—';
       document.getElementById('detail-service-runtime-id').textContent = s.runtime_id || 'N/A';
       document.getElementById('detail-service-route').textContent = s.route || 'N/A';
 
-      // Load Deploys list
+      // Cache current_deploy_id for rollback UX
+      const idx = servicesCache.findIndex((x) => x.name === serviceName);
+      if (idx >= 0) servicesCache[idx] = { ...servicesCache[idx], ...s };
+      else servicesCache.push(s);
+
       loadDeployHistory(s.name);
+      loadConsoleLogs(s.name, { force: true });
 
-      // Load Logs first time
-      loadConsoleLogs(s.name);
-      
-      // Auto refresh logs every 3 seconds
       activeLogsInterval = setInterval(() => {
-        loadConsoleLogs(s.name);
-      }, 3000);
+        if (activeServiceName === s.name) loadConsoleLogs(s.name, { force: false });
+      }, LOGS_POLL_MS);
 
-      // Wire service action buttons
-      setupServiceActions(s.name);
-
+      setupServiceActions(s.name, s.actual_state);
     } catch (err) {
       console.error('Failed to inspect service:', err);
+      showToast(`Failed to load service: ${err.message}`, 'error');
+      document.getElementById('lifecycle-hint').textContent = err.message;
     }
   }
 
-  // Setup service actions (start/stop/restart)
-  function setupServiceActions(serviceName) {
+  function setupServiceActions(serviceName, actualState) {
     const btnStart = document.getElementById('btn-action-start');
     const btnStop = document.getElementById('btn-action-stop');
     const btnRestart = document.getElementById('btn-action-restart');
     const btnRefresh = document.getElementById('btn-logs-refresh');
     const btnClear = document.getElementById('btn-logs-clear');
-    
-    // Clear old event listeners
-    const newStart = btnStart.cloneNode(true);
-    const newStop = btnStop.cloneNode(true);
-    const newRestart = btnRestart.cloneNode(true);
-    const newRefresh = btnRefresh.cloneNode(true);
-    
-    btnStart.parentNode.replaceChild(newStart, btnStart);
-    btnStop.parentNode.replaceChild(newStop, btnStop);
-    btnRestart.parentNode.replaceChild(newRestart, btnRestart);
-    btnRefresh.parentNode.replaceChild(newRefresh, btnRefresh);
+    const hint = document.getElementById('lifecycle-hint');
 
-    newStart.addEventListener('click', async () => {
-      newStart.disabled = true;
-      try {
-        await apiCall(`/services/${serviceName}/start`, 'POST');
-        showServiceDetail(serviceName);
-      } catch (e) { alert(e.message); }
-      newStart.disabled = false;
-    });
+    // Clone to drop old listeners
+    const wire = (btn, handler) => {
+      const next = btn.cloneNode(true);
+      btn.parentNode.replaceChild(next, btn);
+      next.addEventListener('click', handler);
+      return next;
+    };
 
-    newStop.addEventListener('click', async () => {
-      newStop.disabled = true;
-      try {
-        await apiCall(`/services/${serviceName}/stop`, 'POST');
-        showServiceDetail(serviceName);
-      } catch (e) { alert(e.message); }
-      newStop.disabled = false;
+    const newStart = wire(btnStart, async () => {
+      await runLifecycle(serviceName, 'start', newStart);
     });
-
-    newRestart.addEventListener('click', async () => {
-      newRestart.disabled = true;
-      try {
-        await apiCall(`/services/${serviceName}/restart`, 'POST');
-        showServiceDetail(serviceName);
-      } catch (e) { alert(e.message); }
-      newRestart.disabled = false;
+    const newStop = wire(btnStop, async () => {
+      await runLifecycle(serviceName, 'stop', newStop);
     });
-
-    newRefresh.addEventListener('click', () => {
-      loadConsoleLogs(serviceName);
+    const newRestart = wire(btnRestart, async () => {
+      await runLifecycle(serviceName, 'restart', newRestart);
     });
+    const newRefresh = wire(btnRefresh, () => loadConsoleLogs(serviceName, { force: true }));
 
     btnClear.onclick = () => {
-      document.getElementById('service-logs-console').innerHTML = '<div class="log-line text-muted">Console cleared.</div>';
+      lastLogsText = '';
+      document.getElementById('service-logs-console').innerHTML =
+        '<div class="log-line text-muted">Console cleared (local view only).</div>';
     };
+
+    // State-aware enablement when online
+    const state = (actualState || '').toLowerCase();
+    const online = isOnline;
+    newStart.disabled = !online || state === 'running' || state === 'starting';
+    newStop.disabled = !online || state === 'stopped' || state === 'failed';
+    newRestart.disabled = !online;
+    newRefresh.disabled = !online;
+
+    if (!online) {
+      hint.textContent = 'Daemon offline — lifecycle actions disabled.';
+    } else if (state === 'running') {
+      hint.textContent = 'Service is running. Stop or restart as needed.';
+    } else if (state === 'stopped') {
+      hint.textContent = 'Service is stopped. Start to bring it up.';
+    } else {
+      hint.textContent = '';
+    }
   }
 
-  // Load Deploy History
+  async function runLifecycle(serviceName, action, btn) {
+    if (!isOnline) {
+      showToast('Daemon offline', 'error');
+      return;
+    }
+    btn.dataset.busy = '1';
+    btn.disabled = true;
+    try {
+      await apiCall(`/services/${encodeURIComponent(serviceName)}/${action}`, 'POST');
+      showToast(`${capitalize(action)} requested for ${serviceName}`, 'success');
+      await showServiceDetail(serviceName);
+      if (currentRoute === '#/services') loadServicesData({ silent: true });
+      if (currentRoute === '#/overview') loadOverviewData({ silent: true });
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      btn.dataset.busy = '0';
+      if (isOnline) btn.disabled = false;
+    }
+  }
+
   async function loadDeployHistory(serviceName) {
     const historyList = document.getElementById('detail-deploys-list');
-    historyList.innerHTML = '<p class="text-muted">Loading deploy history...</p>';
+    historyList.innerHTML = '<p class="text-muted">Loading deploy history…</p>';
 
     try {
-      let deploys = await apiCall(`/services/${serviceName}/deploys`);
+      let deploys = await apiCall(`/services/${encodeURIComponent(serviceName)}/deploys`);
       deploys = deploys || [];
       historyList.innerHTML = '';
+
       if (deploys.length === 0) {
-        historyList.innerHTML = '<p class="text-muted">No deployments found.</p>';
+        historyList.innerHTML = `
+          <div class="empty-state compact">
+            <p class="empty-title">No deployments</p>
+            <p class="text-muted">Deploy history will appear after the first deploy.</p>
+          </div>`;
         return;
       }
 
-      deploys.forEach(d => {
+      const svc = servicesCache.find((x) => x.name === serviceName);
+
+      deploys.forEach((d) => {
         const item = document.createElement('div');
         item.className = 'deploy-history-item';
-        
-        // Show status badge
-        const badge = `<span class="badge ${d.status === 'success' ? 'running' : d.status === 'failed' ? 'stopped' : 'starting'}">${d.status}</span>`;
-        
-        // Rollback button if it is a completed deploy and not current
-        const svc = servicesCache.find(x => x.name === serviceName);
+        const status = (d.status || 'unknown').toLowerCase();
+        const badgeClass =
+          status === 'success' || status === 'completed'
+            ? 'running'
+            : status === 'failed'
+              ? 'stopped'
+              : 'starting';
+        const badge = `<span class="badge ${badgeClass}">${escapeHtml(d.status || 'unknown')}</span>`;
         const isCurrent = svc && svc.current_deploy_id === d.id;
-        const rollbackBtn = (!isCurrent && d.status === 'success') 
-          ? `<button class="btn btn-secondary btn-sm" id="btn-rollback-${d.id}" style="padding:4px 8px;font-size:11px;">Rollback</button>`
-          : (isCurrent ? '<span class="text-muted text-sm font-bold">Active</span>' : '');
+        const canRollback = !isCurrent && status === 'success' && isOnline;
+
+        let actionHtml = '';
+        if (isCurrent) {
+          actionHtml = '<span class="deploy-active-tag">Active</span>';
+        } else if (canRollback) {
+          actionHtml = `<button type="button" class="btn btn-secondary btn-sm btn-rollback needs-online" data-deploy-id="${escapeHtml(d.id)}" title="Roll back to this deploy">Rollback</button>`;
+        } else if (!isOnline && !isCurrent && status === 'success') {
+          actionHtml = `<button type="button" class="btn btn-secondary btn-sm" disabled title="Daemon offline">Rollback</button>`;
+        }
+
+        const idShort = escapeHtml((d.id || '').slice(0, 8));
+        const ver = d.version != null ? escapeHtml(String(d.version)) : '—';
+        const reason = d.failure_reason
+          ? `<span class="text-danger deploy-fail-reason" title="${escapeHtml(d.failure_reason)}">Reason: ${escapeHtml(d.failure_reason)}</span>`
+          : '';
 
         item.innerHTML = `
           <div class="deploy-history-meta">
-            <span class="deploy-version">Deploy ${d.id.slice(0, 8)} (v${d.version})</span>
-            <span class="deploy-date">${formatDateTime(d.created_at)}</span>
-            ${d.failure_reason ? `<span class="text-danger" style="font-size:11px;">Reason: ${d.failure_reason}</span>` : ''}
+            <span class="deploy-version">Deploy <span class="text-mono">${idShort}</span> <span class="text-muted">(v${ver})</span></span>
+            <span class="deploy-date">${escapeHtml(formatDateTime(d.created_at))}</span>
+            ${reason}
           </div>
-          <div style="display:flex;align-items:center;gap:12px;">
+          <div class="deploy-history-actions">
             ${badge}
-            ${rollbackBtn}
-          </div>
-        `;
+            ${actionHtml}
+          </div>`;
 
-        const btn = item.querySelector(`#btn-rollback-${d.id}`);
-        if (btn) {
-          btn.addEventListener('click', () => triggerRollback(serviceName, d.id));
+        const rb = item.querySelector('.btn-rollback');
+        if (rb) {
+          rb.addEventListener('click', () => triggerRollback(serviceName, d.id));
         }
-
+        if (isCurrent) item.classList.add('is-current');
         historyList.appendChild(item);
       });
     } catch (err) {
       console.error('Failed to load history:', err);
-      historyList.innerHTML = `<p class="text-danger">Failed to load history: ${err.message}</p>`;
+      historyList.innerHTML = `<p class="text-danger">Failed to load history: ${escapeHtml(err.message)}</p>`;
     }
   }
 
-  // Rollback Action
   async function triggerRollback(serviceName, deployID) {
+    if (!isOnline) {
+      showToast('Daemon offline', 'error');
+      return;
+    }
     try {
-      const res = await apiCall(`/services/${serviceName}/rollback`, 'POST', { deploy_id: deployID, force: false });
-      
-      if (res.conflict) {
-        // Rollback is unsafe because database schema or state has changed!
+      const res = await apiCall(`/services/${encodeURIComponent(serviceName)}/rollback`, 'POST', {
+        deploy_id: deployID,
+        force: false,
+      });
+
+      if (res && res.conflict) {
         promptDangerousAction({
           title: 'Unsafe Rollback Detected',
-          message: res.message,
+          message:
+            res.message ||
+            'This rollback may be unsafe because database schema or volume state has changed since that deploy.',
           forceTextRequired: true,
           onProceed: async () => {
-            const finalRes = await apiCall(`/services/${serviceName}/rollback`, 'POST', { deploy_id: deployID, force: true });
-            if (finalRes.error) {
-              alert('Rollback failed: ' + finalRes.error);
-            } else {
-              alert('Force Rollback started successfully!');
-              closeServiceModal();
-              loadOverviewData();
+            try {
+              const finalRes = await apiCall(
+                `/services/${encodeURIComponent(serviceName)}/rollback`,
+                'POST',
+                { deploy_id: deployID, force: true }
+              );
+              if (finalRes && finalRes.error) {
+                showToast('Rollback failed: ' + finalRes.error, 'error');
+              } else {
+                showToast('Force rollback started', 'success');
+                closeServiceModal();
+                refreshActivePanel(true);
+              }
+            } catch (e) {
+              showToast('Rollback failed: ' + e.message, 'error');
             }
-          }
+          },
         });
       } else {
-        alert('Rollback initiated successfully!');
+        showToast('Rollback initiated', 'success');
         closeServiceModal();
-        loadOverviewData();
+        refreshActivePanel(true);
       }
     } catch (err) {
-      alert('Rollback failed: ' + err.message);
+      showToast('Rollback failed: ' + err.message, 'error');
     }
   }
 
-  // Load logs
-  async function loadConsoleLogs(serviceName) {
+  async function loadConsoleLogs(serviceName, { force } = {}) {
     const consolePane = document.getElementById('service-logs-console');
+    const follow = document.getElementById('chk-logs-follow').checked;
+    const nearBottom =
+      consolePane.scrollHeight - consolePane.scrollTop - consolePane.clientHeight < 48;
+
     try {
-      const res = await fetch(`/services/${serviceName}/logs`);
-      if (!res.ok) throw new Error('Logs failed');
+      const res = await fetch(`/services/${encodeURIComponent(serviceName)}/logs`, {
+        cache: 'no-store',
+      });
+      if (!res.ok) throw new Error(`Logs failed (HTTP ${res.status})`);
       const text = await res.text();
-      
-      if (text.trim() === '') {
+
+      if (!force && text === lastLogsText) return;
+      lastLogsText = text;
+
+      if (!text || text.trim() === '') {
         consolePane.innerHTML = '<div class="log-line text-muted">No logs recorded yet.</div>';
         return;
       }
 
-      // Convert text to clean lines
       const lines = text.split('\n');
-      consolePane.innerHTML = '';
-      lines.forEach(l => {
+      const frag = document.createDocumentFragment();
+      lines.forEach((l) => {
         if (!l.trim()) return;
-        
         const lineDiv = document.createElement('div');
         lineDiv.className = 'log-line';
-        
-        // Parse minidocker prefix time if matches format YYYY-MM-DDTHH:MM:SS.mmm
         const match = l.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z?)\s(.*)$/);
         if (match) {
-          lineDiv.innerHTML = `<span class="log-timestamp">${formatTime(match[1])}</span><span>${escapeHtml(match[2])}</span>`;
+          lineDiv.innerHTML = `<span class="log-timestamp">${escapeHtml(formatTime(match[1]))}</span><span class="log-body">${escapeHtml(match[2])}</span>`;
         } else {
           lineDiv.textContent = l;
         }
-        consolePane.appendChild(lineDiv);
+        frag.appendChild(lineDiv);
       });
-      
-      // scroll to bottom
-      consolePane.scrollTop = consolePane.scrollHeight;
+      consolePane.innerHTML = '';
+      consolePane.appendChild(frag);
 
+      if (follow || nearBottom) {
+        consolePane.scrollTop = consolePane.scrollHeight;
+      }
     } catch (err) {
-      consolePane.innerHTML = `<div class="log-line text-danger">Failed to fetch logs: ${err.message}</div>`;
+      if (force || !lastLogsText) {
+        consolePane.innerHTML = `<div class="log-line text-danger">Failed to fetch logs: ${escapeHtml(err.message)}</div>`;
+      }
     }
   }
 
-  // Log Wrap button toggle
-  const btnWrap = document.getElementById('btn-logs-wrap');
-  btnWrap.addEventListener('click', () => {
+  document.getElementById('btn-logs-wrap').addEventListener('click', () => {
     const pane = document.getElementById('service-logs-console');
+    const btn = document.getElementById('btn-logs-wrap');
     pane.classList.toggle('nowrap');
-    btnWrap.classList.toggle('active');
+    btn.classList.toggle('active');
   });
 
-  // Close service modal
   function closeServiceModal() {
-    document.getElementById('modal-service-detail').classList.add('hidden');
+    const modal = document.getElementById('modal-service-detail');
+    deactivateModalTrap(modal);
+    activeServiceName = null;
     if (activeLogsInterval) {
       clearInterval(activeLogsInterval);
       activeLogsInterval = null;
@@ -487,206 +914,368 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   document.getElementById('btn-close-service-modal').addEventListener('click', closeServiceModal);
+  document.getElementById('modal-service-detail').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-service-detail') closeServiceModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!document.getElementById('modal-confirm-action').classList.contains('hidden')) {
+        closeConfirmModal();
+      } else if (!document.getElementById('modal-service-detail').classList.contains('hidden')) {
+        closeServiceModal();
+      }
+      return;
+    }
 
-  // VOLUMES & BACKUPS TAB
-  async function loadVolumesData() {
+    if (e.key !== 'Tab') return;
+    const top = getTopModal();
+    if (!top) return;
+    const focusables = getFocusable(top);
+    if (!focusables.length) {
+      e.preventDefault();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first || !top.contains(document.activeElement)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (document.activeElement === last || !top.contains(document.activeElement)) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // VOLUMES & BACKUPS
+  // ---------------------------------------------------------------------------
+  async function loadVolumesData({ silent } = {}) {
     const tbody = document.getElementById('volumes-list-body');
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center">Loading volumes...</td></tr>';
-    
+    if (!silent) {
+      tbody.innerHTML = skeletonTableRows(5, 3);
+    }
+
     try {
       let volumes = await apiCall('/volumes');
       volumes = volumes || [];
       tbody.innerHTML = '';
 
       if (volumes.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center">No persistent volumes defined.</td></tr>';
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="5">
+              <div class="empty-state compact">
+                <p class="empty-title">No persistent volumes</p>
+                <p class="text-muted">Volumes appear when services declare stateful mounts.</p>
+              </div>
+            </td>
+          </tr>`;
+        setPanelError('volumes-error', null);
+        updateLastUpdated();
         return;
       }
 
-      volumes.forEach(v => {
+      volumes.forEach((v) => {
         const tr = document.createElement('tr');
-        tr.id = `volume-row-${v.name}`;
+        tr.id = `volume-row-${cssEscape(v.name)}`;
+        tr.dataset.volumeName = v.name;
+        const name = escapeHtml(v.name || '');
+        const attached = v.attached_service_id
+          ? escapeHtml(String(v.attached_service_id).slice(0, 8))
+          : 'Unattached';
+        const mount = escapeHtml(v.mount_path || 'N/A');
+        const host = escapeHtml(v.host_path || '—');
         tr.innerHTML = `
-          <td><span class="font-bold">${v.name}</span></td>
-          <td><span class="badge badge-secondary" style="background-color:rgba(255,255,255,0.05);color:var(--text-muted);border:none;">${v.attached_service_id ? v.attached_service_id.slice(0, 8) : 'Unattached'}</span></td>
-          <td><span class="text-mono">${v.mount_path || 'N/A'}</span></td>
-          <td><span class="text-muted text-sm">${v.host_path}</span></td>
+          <td><span class="font-bold service-name-cell" title="${name}">${name}</span></td>
+          <td><span class="badge badge-secondary">${attached}</span></td>
+          <td><span class="text-mono route-cell" title="${mount}">${mount}</span></td>
+          <td><span class="text-muted text-sm route-cell" title="${host}">${host}</span></td>
           <td>
-            <button class="btn btn-secondary btn-sm" id="btn-inspect-vol-${v.name}">Inspect Backups</button>
-          </td>
-        `;
-        
-        tr.querySelector(`#btn-inspect-vol-${v.name}`).addEventListener('click', () => selectVolume(v.name));
+            <button type="button" class="btn btn-secondary btn-sm btn-inspect-vol">Inspect</button>
+          </td>`;
+        tr.querySelector('.btn-inspect-vol').addEventListener('click', () => selectVolume(v.name));
+        tr.addEventListener('click', (ev) => {
+          if (ev.target.closest('button')) return;
+          selectVolume(v.name);
+        });
+        tr.style.cursor = 'pointer';
         tbody.appendChild(tr);
       });
 
-      // Restore highlight if selected previously
       if (selectedVolumeName) {
-        selectVolume(selectedVolumeName);
+        const stillThere = volumes.some((v) => v.name === selectedVolumeName);
+        if (stillThere) selectVolume(selectedVolumeName);
+        else {
+          selectedVolumeName = null;
+          resetBackupInspector();
+        }
       }
+
+      setPanelError('volumes-error', null);
+      updateLastUpdated();
     } catch (err) {
       console.error('Failed to load volumes:', err);
-      tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center">Error: ${err.message}</td></tr>`;
+      setPanelError('volumes-error', `Failed to load volumes: ${err.message}`);
+      if (!silent) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center">Error: ${escapeHtml(err.message)}</td></tr>`;
+      }
     }
   }
 
-  // Inspect Backups for selected volume
+  function resetBackupInspector() {
+    document.getElementById('backup-subtitle').textContent = 'Select a volume to view backups';
+    document.getElementById('btn-create-backup').classList.add('hidden');
+    document.getElementById('backups-list-body').innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">No volume selected</p>
+        <p class="text-muted">Choose a volume on the left to inspect snapshots and restore points.</p>
+      </div>`;
+  }
+
   async function selectVolume(volumeName) {
     selectedVolumeName = volumeName;
-    
-    // Highlight table row
-    const rows = document.querySelectorAll('#volumes-list-body tr');
-    rows.forEach(r => r.classList.remove('volume-row-selected'));
-    
-    const selectedRow = document.getElementById(`volume-row-${volumeName}`);
-    if (selectedRow) selectedRow.classList.add('volume-row-selected');
 
-    // Show backups card
-    const card = document.getElementById('backup-inspector-card');
-    card.classList.remove('hidden');
+    document.querySelectorAll('#volumes-list-body tr').forEach((r) => {
+      r.classList.toggle('volume-row-selected', r.dataset.volumeName === volumeName);
+    });
 
     document.getElementById('backup-subtitle').textContent = `Volume: ${volumeName}`;
-    
+
     const btnCreate = document.getElementById('btn-create-backup');
     btnCreate.classList.remove('hidden');
-    
-    // Rebind create backup button
+    btnCreate.disabled = !isOnline;
+
     const newBtn = btnCreate.cloneNode(true);
     btnCreate.parentNode.replaceChild(newBtn, btnCreate);
+    newBtn.disabled = !isOnline;
     newBtn.addEventListener('click', () => triggerCreateBackup(volumeName));
 
     loadBackupsList(volumeName);
   }
 
-  // Load backups list
   async function loadBackupsList(volumeName) {
     const listBody = document.getElementById('backups-list-body');
-    listBody.innerHTML = '<p class="text-muted text-center py-4">Loading backups...</p>';
+    listBody.innerHTML = skeletonStackHtml(2);
 
     try {
-      let backups = await apiCall(`/volumes/${volumeName}/backups`);
+      let backups = await apiCall(`/volumes/${encodeURIComponent(volumeName)}/backups`);
       backups = backups || [];
       listBody.innerHTML = '';
 
       if (backups.length === 0) {
-        listBody.innerHTML = '<p class="text-muted text-center py-4">No backups created for this volume.</p>';
+        listBody.innerHTML = `
+          <div class="empty-state compact">
+            <p class="empty-title">No backups yet</p>
+            <p class="text-muted">Create a snapshot with <strong>Backup Now</strong>.</p>
+          </div>`;
         return;
       }
 
-      backups.forEach(b => {
+      backups.forEach((b) => {
         const item = document.createElement('div');
         item.className = 'backup-item';
-        
-        const sizeMb = (b.size_bytes / (1024 * 1024)).toFixed(2);
-        
+        const sizeMb =
+          b.size_bytes != null ? (Number(b.size_bytes) / (1024 * 1024)).toFixed(2) : '—';
+        const idShort = escapeHtml((b.id || '').slice(0, 12));
+        const status = escapeHtml(b.status || 'unknown');
+        const checksum = b.checksum ? escapeHtml(String(b.checksum).slice(0, 16)) : '—';
         item.innerHTML = `
           <div class="backup-meta-info">
-            <span class="backup-id">${b.id.slice(0, 12)}...</span>
-            <span class="backup-subtext">Status: <strong>${b.status}</strong> | Size: ${sizeMb} MB</span>
-            <span class="backup-subtext">Created: ${formatDateTime(b.created_at)}</span>
-            <span class="backup-subtext text-mono" style="font-size:10px;">SHA256: ${b.checksum.slice(0, 16)}</span>
+            <span class="backup-id text-mono">${idShort}…</span>
+            <span class="backup-subtext">Status: <strong>${status}</strong> · ${sizeMb} MB</span>
+            <span class="backup-subtext">Created: ${escapeHtml(formatDateTime(b.created_at))}</span>
+            <span class="backup-subtext text-mono" style="font-size:10px;">SHA256: ${checksum}</span>
           </div>
           <div>
-            <button class="btn btn-secondary btn-sm" id="btn-restore-${b.id}" style="padding:4px 8px;font-size:11px;">Restore</button>
-          </div>
-        `;
-
-        item.querySelector(`#btn-restore-${b.id}`).addEventListener('click', () => triggerRestoreBackup(volumeName, b.id));
+            <button type="button" class="btn btn-secondary btn-sm btn-restore needs-online" ${isOnline ? '' : 'disabled'} style="padding:4px 8px;font-size:11px;">Restore</button>
+          </div>`;
+        item.querySelector('.btn-restore').addEventListener('click', () =>
+          triggerRestoreBackup(volumeName, b.id)
+        );
         listBody.appendChild(item);
       });
     } catch (err) {
-      listBody.innerHTML = `<p class="text-danger text-center py-4">Error loading backups: ${err.message}</p>`;
+      listBody.innerHTML = `<p class="text-danger text-center py-4">Error loading backups: ${escapeHtml(err.message)}</p>`;
     }
   }
 
-  // Create Backup Action
   async function triggerCreateBackup(volumeName) {
+    if (!isOnline) {
+      showToast('Daemon offline', 'error');
+      return;
+    }
     const btnCreate = document.getElementById('btn-create-backup');
+    btnCreate.dataset.busy = '1';
     btnCreate.disabled = true;
-    
     try {
-      alert(`Creating volume snapshot backup for '${volumeName}'...`);
-      const backup = await apiCall(`/volumes/${volumeName}/backups`, 'POST');
-      alert(`Backup '${backup.id}' created successfully! Checksum: ${backup.checksum.slice(0, 12)}`);
+      showToast(`Creating backup for ${volumeName}…`, 'info');
+      const backup = await apiCall(`/volumes/${encodeURIComponent(volumeName)}/backups`, 'POST');
+      const id = backup && backup.id ? backup.id.slice(0, 12) : '';
+      showToast(`Backup created${id ? ': ' + id : ''}`, 'success');
       loadBackupsList(volumeName);
     } catch (err) {
-      alert('Backup failed: ' + err.message);
+      showToast('Backup failed: ' + err.message, 'error');
+    } finally {
+      btnCreate.dataset.busy = '0';
+      btnCreate.disabled = !isOnline;
     }
-    btnCreate.disabled = false;
   }
 
-  // Restore Backup Action
-  async function triggerRestoreBackup(volumeName, backupID) {
+  function triggerRestoreBackup(volumeName, backupID) {
+    if (!isOnline) {
+      showToast('Daemon offline', 'error');
+      return;
+    }
     promptDangerousAction({
       title: 'Destructive Volume Restore',
-      message: `You are about to restore backup '${backupID.slice(0, 8)}' into volume '${volumeName}'. This replaces ALL existing files in the volume. The connected container service will be stopped during restoration. This is destructive and cannot be undone.`,
+      message: `You are about to restore backup '${(backupID || '').slice(0, 8)}' into volume '${volumeName}'. This replaces ALL existing files in the volume. The connected container service will be stopped during restoration. This cannot be undone.`,
       forceTextRequired: false,
       onProceed: async () => {
         try {
-          alert(`Initiating restore path for '${volumeName}'...`);
-          await apiCall(`/volumes/${volumeName}/restore`, 'POST', { backup_id: backupID });
-          alert(`Volume '${volumeName}' restored successfully!`);
-          loadOverviewData();
+          showToast(`Restoring ${volumeName}…`, 'info');
+          await apiCall(`/volumes/${encodeURIComponent(volumeName)}/restore`, 'POST', {
+            backup_id: backupID,
+          });
+          showToast(`Volume '${volumeName}' restored`, 'success');
           if (selectedVolumeName === volumeName) loadBackupsList(volumeName);
+          refreshActivePanel(true);
         } catch (e) {
-          alert('Restore failed: ' + e.message);
+          showToast('Restore failed: ' + e.message, 'error');
         }
-      }
+      },
     });
   }
 
+  // ---------------------------------------------------------------------------
   // EVENTS TIMELINE
-  async function loadEventsTimeline() {
+  // ---------------------------------------------------------------------------
+  async function loadEventsTimeline({ silent } = {}) {
     const body = document.getElementById('timeline-events-body');
-    body.innerHTML = '<p class="text-muted text-center py-5">Loading events timeline...</p>';
+    const filterSel = document.getElementById('events-type-filter');
+    const prevFilter = filterSel.value || 'all';
+    const autoScroll = document.getElementById('chk-events-autoscroll').checked;
+    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 64;
+
+    if (!silent) {
+      body.innerHTML = skeletonStackHtml(4);
+    }
 
     try {
       let events = await apiCall('/events');
       events = events || [];
+      eventsCache = events;
+
+      // Rebuild type filter options (preserve selection when possible)
+      const types = Array.from(new Set(events.map((e) => e.type).filter(Boolean))).sort();
+      const currentOptions = Array.from(filterSel.options).map((o) => o.value);
+      const nextTypes = ['all', ...types];
+      if (currentOptions.join('|') !== nextTypes.join('|')) {
+        filterSel.innerHTML = '';
+        const allOpt = document.createElement('option');
+        allOpt.value = 'all';
+        allOpt.textContent = 'All types';
+        filterSel.appendChild(allOpt);
+        types.forEach((t) => {
+          const opt = document.createElement('option');
+          opt.value = t;
+          opt.textContent = t;
+          filterSel.appendChild(opt);
+        });
+        if (nextTypes.includes(prevFilter)) filterSel.value = prevFilter;
+      }
+
+      const typeFilter = filterSel.value || 'all';
+      const filtered =
+        typeFilter === 'all' ? events : events.filter((e) => e.type === typeFilter);
+
+      document.getElementById('events-subtitle').textContent =
+        filtered.length === events.length
+          ? `${events.length} event${events.length === 1 ? '' : 's'}`
+          : `${filtered.length} of ${events.length} events`;
+
       body.innerHTML = '';
 
-      if (events.length === 0) {
-        body.innerHTML = '<p class="text-muted text-center py-5">No events logged in system database.</p>';
+      if (filtered.length === 0) {
+        body.innerHTML = `
+          <div class="empty-state">
+            <p class="empty-title">${events.length === 0 ? 'No events logged' : 'No events of this type'}</p>
+            <p class="text-muted">${
+              events.length === 0
+                ? 'Daemon state changes and deployments will appear on this timeline.'
+                : 'Clear the type filter to see all events.'
+            }</p>
+          </div>`;
+        setPanelError('events-error', null);
+        updateLastUpdated();
         return;
       }
 
-      events.forEach(e => {
+      filtered.forEach((e) => {
         const node = document.createElement('div');
-        const typeClass = e.type.toLowerCase();
-        node.className = `timeline-node ${typeClass.includes('deploy') ? 'deploy' : typeClass.includes('volume') ? 'volume' : typeClass.includes('backup') ? 'backup' : typeClass.includes('restore') ? 'restore' : typeClass.includes('crash') ? 'crash' : ''}`;
-        
+        node.className = `timeline-node ${eventTypeClass(e.type)}`;
+        let metaBlock = '';
+        if (e.metadata_json && e.metadata_json !== '{}') {
+          let pretty = e.metadata_json;
+          try {
+            pretty = JSON.stringify(JSON.parse(e.metadata_json), null, 2);
+          } catch (_) {
+            /* keep raw */
+          }
+          metaBlock = `
+            <button type="button" class="btn-link text-sm mt-2 toggle-metadata">Inspect metadata »</button>
+            <pre class="timeline-json hidden">${escapeHtml(pretty)}</pre>`;
+        }
         node.innerHTML = `
-          <div class="timeline-meta">${formatDateTime(e.created_at)}</div>
-          <div class="timeline-title">${e.type}</div>
-          <div class="timeline-desc">${e.message}</div>
-          ${e.metadata_json && e.metadata_json !== '{}' ? `
-            <a href="#" class="btn-link text-sm mt-2 d-inline-block toggle-metadata" id="btn-meta-${e.id}">Inspect Event Metadata &raquo;</a>
-            <pre class="timeline-json hidden" id="json-meta-${e.id}">${escapeHtml(JSON.stringify(JSON.parse(e.metadata_json), null, 2))}</pre>
-          ` : ''}
-        `;
-        
-        const toggle = node.querySelector(`#btn-meta-${e.id}`);
+          <div class="timeline-meta">${escapeHtml(formatDateTime(e.created_at))}</div>
+          <div class="timeline-title"><span class="event-type-pill">${escapeHtml(e.type || 'event')}</span></div>
+          <div class="timeline-desc">${escapeHtml(e.message || '')}</div>
+          ${metaBlock}`;
+
+        const toggle = node.querySelector('.toggle-metadata');
         if (toggle) {
-          toggle.addEventListener('click', (ev) => {
-            ev.preventDefault();
-            const pre = node.querySelector(`#json-meta-${e.id}`);
+          toggle.addEventListener('click', () => {
+            const pre = node.querySelector('.timeline-json');
             pre.classList.toggle('hidden');
-            toggle.innerHTML = pre.classList.contains('hidden') ? 'Inspect Event Metadata &raquo;' : 'Hide Metadata &laquo;';
+            toggle.textContent = pre.classList.contains('hidden')
+              ? 'Inspect metadata »'
+              : 'Hide metadata «';
           });
         }
-
         body.appendChild(node);
       });
+
+      if (autoScroll && (nearBottom || !silent)) {
+        body.scrollTop = body.scrollHeight;
+      }
+
+      setPanelError('events-error', null);
+      updateLastUpdated();
     } catch (err) {
-      body.innerHTML = `<p class="text-danger text-center py-5">Failed to load events timeline: ${err.message}</p>`;
+      setPanelError('events-error', `Failed to load events: ${err.message}`);
+      if (!silent) {
+        body.innerHTML = `<p class="text-danger text-center py-5">Failed to load events timeline: ${escapeHtml(err.message)}</p>`;
+      }
     }
   }
 
-  document.getElementById('btn-refresh-events').addEventListener('click', loadEventsTimeline);
+  document.getElementById('btn-refresh-events').addEventListener('click', () => {
+    loadEventsTimeline({ silent: false });
+  });
+  document.getElementById('events-type-filter').addEventListener('change', () => {
+    // Re-render from cache if available to avoid flash; otherwise fetch
+    if (eventsCache.length) {
+      // Cheap path: re-run loader silently (still fetches for freshness)
+      loadEventsTimeline({ silent: true });
+    } else {
+      loadEventsTimeline({ silent: false });
+    }
+  });
 
-  // GLOBAL DANGEROUS ACTION MODAL CONFIRMATION
-  let currentConfirmCallback = null;
-
+  // ---------------------------------------------------------------------------
+  // Confirm modal
+  // ---------------------------------------------------------------------------
   function promptDangerousAction({ title, message, forceTextRequired = false, onProceed }) {
     const modal = document.getElementById('modal-confirm-action');
     document.getElementById('confirm-title').textContent = title;
@@ -699,66 +1288,159 @@ document.addEventListener('DOMContentLoaded', () => {
     const forceInput = document.getElementById('input-confirm-force');
     forceInput.value = '';
 
-    if (forceTextRequired) {
-      forceInputWrapper.classList.remove('hidden');
-    } else {
-      forceInputWrapper.classList.add('hidden');
-    }
+    if (forceTextRequired) forceInputWrapper.classList.remove('hidden');
+    else forceInputWrapper.classList.add('hidden');
 
     const btnProceed = document.getElementById('btn-confirm-proceed');
     btnProceed.disabled = true;
 
-    // Checkbox and text validation
     function validateInput() {
       const isChecked = chk.checked;
-      const textMatch = !forceTextRequired || (forceInput.value.trim().toUpperCase() === 'FORCE');
+      const textMatch = !forceTextRequired || forceInput.value.trim().toUpperCase() === 'FORCE';
       btnProceed.disabled = !(isChecked && textMatch);
     }
 
     chk.onchange = validateInput;
     forceInput.oninput = validateInput;
 
-    modal.classList.remove('hidden');
+    activateModalTrap(modal);
     currentConfirmCallback = onProceed;
   }
 
   function closeConfirmModal() {
-    document.getElementById('modal-confirm-action').classList.add('hidden');
+    const modal = document.getElementById('modal-confirm-action');
+    deactivateModalTrap(modal);
     currentConfirmCallback = null;
   }
 
   document.getElementById('btn-confirm-cancel').onclick = closeConfirmModal;
   document.getElementById('btn-close-confirm-modal').onclick = closeConfirmModal;
-  
   document.getElementById('btn-confirm-proceed').onclick = () => {
-    if (currentConfirmCallback) {
-      currentConfirmCallback();
-    }
+    const cb = currentConfirmCallback;
     closeConfirmModal();
+    if (cb) cb();
   };
 
-  // Helper Utility functions
+  // ---------------------------------------------------------------------------
+  // Toasts
+  // ---------------------------------------------------------------------------
+  function showToast(message, kind = 'info') {
+    const host = document.getElementById('toast-host');
+    const el = document.createElement('div');
+    el.className = `toast toast-${kind}`;
+    el.textContent = message;
+    host.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(() => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 280);
+    }, 3200);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
   function formatTime(isoString) {
+    if (!isoString) return '—';
     const d = new Date(isoString);
+    if (Number.isNaN(d.getTime())) return String(isoString);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
   function formatDateTime(isoString) {
+    if (!isoString) return '—';
     const d = new Date(isoString);
+    if (Number.isNaN(d.getTime())) return String(isoString);
     const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
     const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     return `${date} ${time}`;
   }
 
-  function escapeHtml(unsafe) {
-    return unsafe
-         .replace(/&/g, "&amp;")
-         .replace(/</g, "&lt;")
-         .replace(/>/g, "&gt;")
-         .replace(/"/g, "&quot;")
-         .replace(/'/g, "&#039;");
+  function formatClock(d) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  // Init Route
+  function escapeHtml(unsafe) {
+    return String(unsafe ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function cssEscape(s) {
+    // Simple id-safe: only used for building ids; prefer data attributes for lookup
+    return String(s).replace(/[^a-zA-Z0-9_-]/g, '_');
+  }
+
+  function sanitizeBadgeClass(state) {
+    const s = String(state || 'unknown')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '');
+    return s || 'unknown';
+  }
+
+  function eventTypeClass(type) {
+    const t = String(type || '').toLowerCase();
+    if (t.includes('deploy')) return 'deploy';
+    if (t.includes('volume')) return 'volume';
+    if (t.includes('backup')) return 'backup';
+    if (t.includes('restore')) return 'restore';
+    if (t.includes('crash') || t.includes('fail')) return 'crash';
+    if (t.includes('start') || t.includes('stop') || t.includes('restart')) return 'lifecycle';
+    return '';
+  }
+
+  function capitalize(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  }
+
+  function skeletonTableRows(cols, rows) {
+    let html = '';
+    for (let i = 0; i < rows; i++) {
+      html += `<tr class="skeleton-row"><td colspan="${cols}"><div class="skeleton skeleton-line"></div></td></tr>`;
+    }
+    return html;
+  }
+
+  function skeletonStackHtml(n) {
+    let html = '<div class="skeleton-stack" aria-hidden="true">';
+    for (let i = 0; i < n; i++) {
+      html += `<div class="skeleton skeleton-line${i % 2 ? ' short' : ''}"></div>`;
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function skeletonServiceCards(n) {
+    let html = '';
+    for (let i = 0; i < n; i++) {
+      html += `
+        <div class="glass-card service-card skeleton-card" aria-hidden="true">
+          <div class="skeleton skeleton-line"></div>
+          <div class="skeleton skeleton-line short"></div>
+          <div class="skeleton skeleton-line"></div>
+        </div>`;
+    }
+    return html;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  // Connecting state until first /status succeeds (not green until then)
+  isOnline = false;
+  document.getElementById('status-indicator').className = 'status-indicator connecting';
+  document.getElementById('daemon-connection-text').textContent = 'Connecting…';
+  document.getElementById('daemon-connection-detail').textContent = 'waiting for /status';
+  document.getElementById('global-banner').classList.add('hidden');
+  document.body.classList.remove('daemon-offline');
+  document.querySelectorAll('.needs-online').forEach((el) => {
+    el.disabled = true;
+  });
+
+  pollDaemonStatus();
+  schedulePanelRefresh();
   handleRoute();
 });
