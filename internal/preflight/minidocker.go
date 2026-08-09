@@ -69,7 +69,7 @@ func ProbeMiniDocker(ctx context.Context, socketPath string) MiniDockerResult {
 	}
 	if last.Message == "" {
 		last.Message = "Mini-Docker socket not found"
-		last.Hint = "Start a single Mini-Docker daemon, e.g.\n  sudo python3 -m mini_docker daemon --socket $XDG_RUNTIME_DIR/mini-docker/mini-docker.sock --socket-mode 666\nEnsure only one daemon owns the socket (dual daemons cause EOF on create)."
+		last.Hint = "Start a single Mini-Docker daemon, e.g.\n  sudo python3 -m mini_docker daemon --socket $XDG_RUNTIME_DIR/mini-docker/mini-docker.sock --socket-mode 660\nEnsure only one daemon owns the socket (dual daemons cause EOF on create)."
 	}
 	return last
 }
@@ -103,7 +103,7 @@ func probeOne(ctx context.Context, socketPath string) MiniDockerResult {
 	resp, err := client.Do(req)
 	if err != nil {
 		res.Message = fmt.Sprintf("cannot talk to Mini-Docker at %s: %v", socketPath, err)
-		res.Hint = "Socket may be stale, permission-denied, or owned by a crashed dual-daemon setup. Remove the stale socket and start exactly one daemon with --socket-mode 666 (or group-writable)."
+		res.Hint = "Socket may be stale, permission-denied, or owned by a crashed dual-daemon setup. Remove the stale socket and start exactly one daemon with --socket-mode 660 (or another explicitly group-writable mode)."
 		return res
 	}
 	defer resp.Body.Close()

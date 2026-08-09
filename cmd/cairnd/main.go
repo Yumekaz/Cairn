@@ -31,7 +31,9 @@ func main() {
 	}
 
 	// Initialize secrets host key
-	config.InitHostKey(cfg.DataDir)
+	if err := config.InitHostKey(cfg.DataDir); err != nil {
+		log.Fatalf("Failed to initialize secrets host key: %v", err)
+	}
 
 	// 2. Setup logging
 	logFile := filepath.Join(cfg.DataDir, "cairnd.log")

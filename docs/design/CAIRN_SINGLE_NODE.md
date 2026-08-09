@@ -84,7 +84,7 @@ Honest map from `docs/STACK.md`:
 | Layer | Projects | Role for Closeout A |
 | --- | --- | --- |
 | **Spine** (required) | **Cairn → Mini-Docker → DuraFlow** | Deploy, recoverability, backups, events |
-| **Lab** (portfolio-adjacent) | FailForge, MiniDB, Coordination-service | Chaos / educational targets; **not** required to close A |
+| **Lab** (portfolio-adjacent) | FailForge, MiniDB, Coordination-service | Chaos / experimental systems targets; **not** required to close A |
 
 ```text
                     Clients / CLI

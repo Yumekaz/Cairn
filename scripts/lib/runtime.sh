@@ -301,7 +301,7 @@ ensure_minidocker() {
       md_log="${CAIRN_MD_LOG:-/tmp/cairn-minidocker-demo.log}"
       : >"$md_log" 2>/dev/null || md_log="/tmp/cairn-minidocker-${USER:-u}-$$.log"
       : >"$md_log" 2>/dev/null || md_log="/dev/null"
-      chmod 666 "$md_log" 2>/dev/null || true
+      chmod 640 "$md_log" 2>/dev/null || true
       ;;
   esac
   _cairn_runtime_log "Starting Mini-Docker daemon on $MINI_DOCKER_SOCKET (log $md_log)"
@@ -311,26 +311,34 @@ ensure_minidocker() {
     root)
       nohup env PYTHONPATH="$PYTHONPATH" "$MD_PY" -m mini_docker daemon \
         --socket "$MINI_DOCKER_SOCKET" \
-        --socket-mode 666 \
+        --socket-mode 660 \
         >>"$md_log" 2>&1 &
       ;;
     password)
       # shellcheck disable=SC2024
       # Root creates its own log file (cannot append to user-owned /tmp files here).
       printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' bash -c \
-        "rm -f $(printf '%q' "$md_log"); umask 000; touch $(printf '%q' "$md_log"); chmod 666 $(printf '%q' "$md_log"); nohup env PYTHONPATH=$(printf '%q' "$PYTHONPATH") $(printf '%q' "$MD_PY") -m mini_docker daemon --socket $(printf '%q' "$MINI_DOCKER_SOCKET") --socket-mode 666 >>$(printf '%q' "$md_log") 2>&1 &"
+        "rm -f $(printf '%q' "$md_log"); umask 027; touch $(printf '%q' "$md_log"); chmod 640 $(printf '%q' "$md_log"); nohup env PYTHONPATH=$(printf '%q' "$PYTHONPATH") $(printf '%q' "$MD_PY") -m mini_docker daemon --socket $(printf '%q' "$MINI_DOCKER_SOCKET") --socket-mode 660 >>$(printf '%q' "$md_log") 2>&1 &"
       ;;
     noninteractive)
       sudo -n bash -c \
-        "rm -f $(printf '%q' "$md_log"); umask 000; touch $(printf '%q' "$md_log"); chmod 666 $(printf '%q' "$md_log"); nohup env PYTHONPATH=$(printf '%q' "$PYTHONPATH") $(printf '%q' "$MD_PY") -m mini_docker daemon --socket $(printf '%q' "$MINI_DOCKER_SOCKET") --socket-mode 666 >>$(printf '%q' "$md_log") 2>&1 &"
+        "rm -f $(printf '%q' "$md_log"); umask 027; touch $(printf '%q' "$md_log"); chmod 640 $(printf '%q' "$md_log"); nohup env PYTHONPATH=$(printf '%q' "$PYTHONPATH") $(printf '%q' "$MD_PY") -m mini_docker daemon --socket $(printf '%q' "$MINI_DOCKER_SOCKET") --socket-mode 660 >>$(printf '%q' "$md_log") 2>&1 &"
       ;;
   esac
 
   local i
   for i in $(seq 1 40); do
-    if [[ -S "$MINI_DOCKER_SOCKET" ]] && _cairn_md_socket_ok "$MINI_DOCKER_SOCKET"; then
-      _cairn_runtime_log "Mini-Docker ready at $MINI_DOCKER_SOCKET"
-      return 0
+    if [[ -S "$MINI_DOCKER_SOCKET" ]]; then
+      # A root-started daemon creates a 0660 socket owned by root. Transfer
+      # ownership to the invoking Cairn user so a non-root cairnd can connect
+      # without falling back to a world-writable socket.
+      if [[ "${CAIRN_SUDO_MODE}" != "root" ]]; then
+        _cairn_sudo_run chown "$(id -u):$(id -g)" "$MINI_DOCKER_SOCKET" 2>/dev/null || true
+      fi
+      if _cairn_md_socket_ok "$MINI_DOCKER_SOCKET"; then
+        _cairn_runtime_log "Mini-Docker ready at $MINI_DOCKER_SOCKET"
+        return 0
+      fi
     fi
     sleep 0.25
   done

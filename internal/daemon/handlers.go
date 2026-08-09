@@ -161,7 +161,6 @@ func formatSize(bytes int64) string {
 	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
 	services, err := s.store.ListServices()
 	if err != nil {
@@ -602,10 +601,10 @@ func (s *Server) performPostgresDumpBackup(vol *api.Volume, dbService *api.Servi
 
 	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
 	taskCfg := &api.ServiceConfig{
-		Name:        dbServiceConfig.Name,
-		Kind:        dbServiceConfig.Kind,
-		Image:       dbServiceConfig.Image,
-		Command:     []string{"sh", "-c", fmt.Sprintf("pg_dump -h %s -U %s -d %s -f /backup_vol/backup_dump.sql", dbIP, user, dbname)},
+		Name:    dbServiceConfig.Name,
+		Kind:    dbServiceConfig.Kind,
+		Image:   dbServiceConfig.Image,
+		Command: postgresDumpCommand(dbIP, user, dbname),
 		Environment: map[string]string{
 			"PGPASSWORD": password,
 		},
@@ -681,13 +680,11 @@ func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service,
 	os.Remove(dumpFileHostPath)
 
 	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
-	cmd := fmt.Sprintf("redis-cli -h %s --rdb /backup_vol/backup_dump.rdb", dbIP)
-
 	taskCfg := &api.ServiceConfig{
-		Name:        dbServiceConfig.Name,
-		Kind:        dbServiceConfig.Kind,
-		Image:       dbServiceConfig.Image,
-		Command:     []string{"sh", "-c", cmd},
+		Name:    dbServiceConfig.Name,
+		Kind:    dbServiceConfig.Kind,
+		Image:   dbServiceConfig.Image,
+		Command: redisDumpCommand(dbIP),
 		Environment: map[string]string{
 			"REDISCLI_AUTH": password,
 		},
@@ -763,19 +760,13 @@ func (s *Server) performMongoDumpBackup(vol *api.Volume, dbService *api.Service,
 	dumpFileHostPath := filepath.Join(vol.HostPath, "backup_dump.archive")
 	os.Remove(dumpFileHostPath)
 
-	authArgs := ""
-	if user != "" && password != "" {
-		authArgs = fmt.Sprintf("--username %s --password %s --authenticationDatabase admin", user, password)
-	}
-
 	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
-	cmd := fmt.Sprintf("mongodump --host %s %s --archive=/backup_vol/backup_dump.archive", dbIP, authArgs)
 
 	taskCfg := &api.ServiceConfig{
-		Name:        dbServiceConfig.Name,
-		Kind:        dbServiceConfig.Kind,
-		Image:       dbServiceConfig.Image,
-		Command:     []string{"sh", "-c", cmd},
+		Name:    dbServiceConfig.Name,
+		Kind:    dbServiceConfig.Kind,
+		Image:   dbServiceConfig.Image,
+		Command: mongoDumpCommand(dbIP, user, password),
 		Volumes: []api.VolumeConfig{
 			{
 				Name:      vol.Name,
@@ -834,6 +825,57 @@ func (s *Server) performMongoDumpBackup(vol *api.Volume, dbService *api.Service,
 	}
 
 	return checksum, sizeBytes, nil
+}
+
+// mongoDumpCommand and mongoRestoreCommand deliberately return argv-style
+// commands. The runtime passes ServiceConfig.Command directly to the
+// container, so user-provided hostnames and credentials never pass through a
+// shell parser.
+func mongoDumpCommand(dbIP, user, password string) []string {
+	args := []string{"mongodump", "--host=" + dbIP}
+	args = appendMongoAuthArgs(args, user, password)
+	return append(args, "--archive=/backup_vol/backup_dump.archive")
+}
+
+func postgresDumpCommand(dbIP, user, dbname string) []string {
+	return []string{
+		"pg_dump",
+		"-h", dbIP,
+		"-U", user,
+		"-d", dbname,
+		"-f", "/backup_vol/backup_dump.sql",
+	}
+}
+
+func postgresRestoreCommand(dbIP, user, dbname string) []string {
+	return []string{
+		"psql",
+		"-h", dbIP,
+		"-U", user,
+		"-d", dbname,
+		"-f", "/backup_vol/restore_dump.sql",
+	}
+}
+
+func redisDumpCommand(dbIP string) []string {
+	return []string{"redis-cli", "-h", dbIP, "--rdb", "/backup_vol/backup_dump.rdb"}
+}
+
+func mongoRestoreCommand(dbIP, user, password string) []string {
+	args := []string{"mongorestore", "--host=" + dbIP}
+	args = appendMongoAuthArgs(args, user, password)
+	return append(args, "--drop", "--archive=/backup_vol/restore_dump.archive")
+}
+
+func appendMongoAuthArgs(args []string, user, password string) []string {
+	if user == "" || password == "" {
+		return args
+	}
+	return append(args,
+		"--username="+user,
+		"--password="+password,
+		"--authenticationDatabase=admin",
+	)
 }
 
 func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
@@ -1436,10 +1478,10 @@ func (s *Server) performPostgresRestore(ctx context.Context, vol *api.Volume, se
 
 	taskName := fmt.Sprintf("cairn-%s-restore-task-%s", service.Name, backup.ID[:8])
 	taskCfg := &api.ServiceConfig{
-		Name:        cfg.Name,
-		Kind:        cfg.Kind,
-		Image:       cfg.Image,
-		Command:     []string{"sh", "-c", fmt.Sprintf("psql -h %s -U %s -d %s -f /backup_vol/restore_dump.sql", dbIP, user, dbname)},
+		Name:    cfg.Name,
+		Kind:    cfg.Kind,
+		Image:   cfg.Image,
+		Command: postgresRestoreCommand(dbIP, user, dbname),
 		Environment: map[string]string{
 			"PGPASSWORD": password,
 		},
@@ -1520,19 +1562,13 @@ func (s *Server) performMongoRestore(ctx context.Context, vol *api.Volume, servi
 	user := cfg.Environment["MONGO_INITDB_ROOT_USERNAME"]
 	password := cfg.Environment["MONGO_INITDB_ROOT_PASSWORD"]
 
-	authArgs := ""
-	if user != "" && password != "" {
-		authArgs = fmt.Sprintf("--username %s --password %s --authenticationDatabase admin", user, password)
-	}
-
 	taskName := fmt.Sprintf("cairn-%s-restore-task-%s", service.Name, backup.ID[:8])
-	cmd := fmt.Sprintf("mongorestore --host %s %s --drop --archive=/backup_vol/restore_dump.archive", dbIP, authArgs)
 
 	taskCfg := &api.ServiceConfig{
-		Name:        cfg.Name,
-		Kind:        cfg.Kind,
-		Image:       cfg.Image,
-		Command:     []string{"sh", "-c", cmd},
+		Name:    cfg.Name,
+		Kind:    cfg.Kind,
+		Image:   cfg.Image,
+		Command: mongoRestoreCommand(dbIP, user, password),
 		Volumes: []api.VolumeConfig{
 			{
 				Name:      vol.Name,

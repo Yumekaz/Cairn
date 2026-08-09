@@ -9,7 +9,7 @@
 | Layer | Projects | Role for Closeout A |
 | --- | --- | --- |
 | **Spine** (required for MLP) | **Cairn → Mini-Docker → DuraFlow** | Single-node deploy, recoverability, backups, events |
-| **Lab** (portfolio-adjacent) | **FailForge**, **MiniDB** (Mini-Redis-Cassandra), **Coordination-service** | Local chaos / educational targets; **not** required to close A |
+| **Lab** (portfolio-adjacent) | **FailForge**, **MiniDB** (Mini-Redis-Cassandra), **Coordination-service** | Local chaos / experimental systems targets; **not** required to close A |
 
 FailForge continuous Cairn CI is **OUT of Closeout A** (optional lab). See [roadmap.md](roadmap.md).
 
@@ -54,7 +54,7 @@ FailForge continuous Cairn CI is **OUT of Closeout A** (optional lab). See [road
 | **Mini-Docker** | Linux container runtime under Cairn | [Yumekaz/Mini-Docker](https://github.com/Yumekaz/Mini-Docker) |
 | **DURAFLOW** | Durable workflow engine used by Cairn deploys | [Yumekaz/DURAFLOW](https://github.com/Yumekaz/DURAFLOW) |
 | **FAILFORGE** | Seeded failure lab (local) | [Yumekaz/FAILFORGE](https://github.com/Yumekaz/FAILFORGE) |
-| **Mini-Redis-Cassandra** | Educational RF-replicated KV; FailForge target | [Yumekaz/Mini-Redis-Cassandra](https://github.com/Yumekaz/Mini-Redis-Cassandra) |
+| **Mini-Redis-Cassandra** | Experimental RF-replicated datastore; FailForge target | [Yumekaz/Mini-Redis-Cassandra](https://github.com/Yumekaz/Mini-Redis-Cassandra) |
 | **Coordination-service** | Sessions, leases, locks; FailForge target | [Yumekaz/Coordination-service](https://github.com/Yumekaz/Coordination-service) |
 
 Spine sibling layout (MLP / cold clone):

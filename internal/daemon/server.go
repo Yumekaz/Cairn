@@ -101,9 +101,10 @@ func (s *Server) setupMiddleware() {
 func (s *Server) Start(ctx context.Context) error {
 	socketPath := s.config.SocketPath
 
-	// Ensure directory for socket exists
-	socketDir := filepath.Dir(socketPath)
-	if err := os.MkdirAll(socketDir, 0755); err != nil {
+	// Ensure the socket directory is private when it is managed by Cairn. A
+	// custom socket directory outside DataDir is still created privately when
+	// missing, but its existing permissions remain operator-controlled.
+	if err := ensureSocketDirectory(socketPath, s.config.DataDir); err != nil {
 		return err
 	}
 
@@ -116,6 +117,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
+		return err
+	}
+	if err := secureUnixSocket(socketPath); err != nil {
+		listener.Close()
 		return err
 	}
 
@@ -191,6 +196,36 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return httpServer.Serve(listener)
+}
+
+func ensureSocketDirectory(socketPath, dataDir string) error {
+	socketDir := filepath.Dir(socketPath)
+	_, statErr := os.Stat(socketDir)
+	if err := os.MkdirAll(socketDir, 0700); err != nil {
+		return fmt.Errorf("create Cairn socket directory %s: %w", socketDir, err)
+	}
+
+	managedDir := filepath.Clean(dataDir) != "." && isPathWithin(filepath.Clean(dataDir), socketDir)
+	if os.IsNotExist(statErr) || managedDir {
+		if err := os.Chmod(socketDir, 0700); err != nil {
+			return fmt.Errorf("secure Cairn socket directory %s: %w", socketDir, err)
+		}
+	} else if statErr != nil {
+		return fmt.Errorf("inspect Cairn socket directory %s: %w", socketDir, statErr)
+	}
+	return nil
+}
+
+func secureUnixSocket(socketPath string) error {
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		return fmt.Errorf("secure Cairn Unix socket %s: %w", socketPath, err)
+	}
+	return nil
+}
+
+func isPathWithin(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (s *Server) startReconciliationLoop(ctx context.Context) {

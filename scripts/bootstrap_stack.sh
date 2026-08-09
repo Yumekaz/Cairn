@@ -318,7 +318,9 @@ Next steps (start runtime manually):
   sudo mkdir -p "\$(dirname "\$MINI_DOCKER_SOCKET")"
   sudo env PYTHONPATH="\$PYTHONPATH" python3 -m mini_docker daemon \\
     --socket "\$MINI_DOCKER_SOCKET" \\
-    --socket-mode 666
+    --socket-mode 660
+  # In a second terminal, after the daemon has created the socket:
+  sudo chown "\$(id -u):\$(id -g)" "\$MINI_DOCKER_SOCKET"
 
   # Or non-interactive: SUDO_PASSWORD='…' ./scripts/bootstrap_stack.sh --start-runtime
   # Or from this repo after install: source scripts/lib/runtime.sh && ensure_minidocker && ensure_cairnd
