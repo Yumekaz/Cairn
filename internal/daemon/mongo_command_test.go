@@ -8,14 +8,14 @@ import (
 func TestMongoCommandsUseStructuredArguments(t *testing.T) {
 	maliciousIP := "db.internal; touch /tmp/pwned"
 	maliciousUser := "admin$(touch /tmp/user)"
-	maliciousPassword := "p@ss; echo compromised"
+	maliciousCredential := "value with spaces; echo compromised"
 
-	dump := mongoDumpCommand(maliciousIP, maliciousUser, maliciousPassword)
+	dump := mongoDumpCommand(maliciousIP, maliciousUser, maliciousCredential)
 	wantDump := []string{
 		"mongodump",
 		"--host=" + maliciousIP,
 		"--username=" + maliciousUser,
-		"--password=" + maliciousPassword,
+		"--password=" + maliciousCredential,
 		"--authenticationDatabase=admin",
 		"--archive=/backup_vol/backup_dump.archive",
 	}
@@ -23,12 +23,12 @@ func TestMongoCommandsUseStructuredArguments(t *testing.T) {
 		t.Fatalf("mongo dump command = %#v, want %#v", dump, wantDump)
 	}
 
-	restore := mongoRestoreCommand(maliciousIP, maliciousUser, maliciousPassword)
+	restore := mongoRestoreCommand(maliciousIP, maliciousUser, maliciousCredential)
 	wantRestore := []string{
 		"mongorestore",
 		"--host=" + maliciousIP,
 		"--username=" + maliciousUser,
-		"--password=" + maliciousPassword,
+		"--password=" + maliciousCredential,
 		"--authenticationDatabase=admin",
 		"--drop",
 		"--archive=/backup_vol/restore_dump.archive",
