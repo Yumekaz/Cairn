@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // CreateTarGz archives srcDir to destFile and returns SHA256 checksum and size.
@@ -131,7 +132,14 @@ func ExtractTarGz(srcFile, destDir string) error {
 			return fmt.Errorf("failed to read next tar entry: %w", err)
 		}
 
-		target := filepath.Join(destDir, header.Name)
+		// Zip Slip guard: reject entries whose cleaned path escapes destDir
+		// via "..", absolute paths that resolve outside, or symlink tricks.
+		cleanDest := filepath.Clean(destDir)
+		target := filepath.Join(cleanDest, header.Name)
+		rel, relErr := filepath.Rel(cleanDest, target)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal path in archive %q: escapes destination directory", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
