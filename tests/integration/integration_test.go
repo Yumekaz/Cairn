@@ -38,6 +38,43 @@ func testHome(t *testing.T) string {
 	return t.TempDir()
 }
 
+// miniDockerInspect queries the Mini-Docker daemon inspect API over its Unix
+// socket instead of reading root-owned state files under /var/lib.
+func miniDockerInspect(t *testing.T, containerID string) map[string]any {
+	t.Helper()
+	sock := os.Getenv("MINI_DOCKER_SOCKET")
+	if sock == "" {
+		base := os.Getenv("XDG_RUNTIME_DIR")
+		if base == "" {
+			base = fmt.Sprintf("/run/user/%d", os.Getuid())
+		}
+		sock = filepath.Join(base, "mini-docker", "mini-docker.sock")
+	}
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+	}
+	resp, err := client.Get("http://minidocker/containers/" + containerID + "/json")
+	if err != nil {
+		t.Fatalf("failed to query Mini-Docker inspect API: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Mini-Docker inspect returned %d: %s", resp.StatusCode, body)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("failed to decode Mini-Docker inspect payload: %v", err)
+	}
+	return payload
+}
+
 // testRepoRoot walks up from cwd looking for the cairn go.mod module root.
 func testRepoRoot(t *testing.T) string {
 	t.Helper()
@@ -775,35 +812,24 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 	defer client.Delete(ctx, "/services/client-service", nil)
 
 	// 4. Verify resolved environment variables
-	dbInfoPath := filepath.Join("/var/lib/mini-docker/containers", dbSvc.RuntimeID, "config.json")
-	dbInfoBytes, err := os.ReadFile(dbInfoPath)
-	if err != nil {
-		t.Fatalf("failed to read db container config: %v", err)
+	dbInfo := miniDockerInspect(t, dbSvc.RuntimeID)
+	dbNet, ok := dbInfo["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected inspect payload for db container: %v", dbInfo)
 	}
-	var dbConfig struct {
-		Network struct {
-			IP string `json:"ip"`
-		} `json:"network"`
+	dbIP, _ := dbNet["ip"].(string)
+	if dbIP == "" {
+		t.Fatalf("db container has no IP in inspect payload: %v", dbInfo)
 	}
-	if err := json.Unmarshal(dbInfoBytes, &dbConfig); err != nil {
-		t.Fatalf("failed to parse db container config: %v", err)
-	}
-	dbIP := dbConfig.Network.IP
 	t.Logf("Database service IP is: %s", dbIP)
 
-	clientInfoPath := filepath.Join("/var/lib/mini-docker/containers", clientSvc.RuntimeID, "config.json")
-	clientInfoBytes, err := os.ReadFile(clientInfoPath)
-	if err != nil {
-		t.Fatalf("failed to read client container config: %v", err)
-	}
-	var clientConfig struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal(clientInfoBytes, &clientConfig); err != nil {
-		t.Fatalf("failed to parse client container config: %v", err)
+	clientInfo := miniDockerInspect(t, clientSvc.RuntimeID)
+	clientEnv, ok := clientInfo["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected inspect payload for client container: %v", clientInfo)
 	}
 
-	resolvedURL := clientConfig.Env["DATABASE_URL"]
+	resolvedURL, _ := clientEnv["DATABASE_URL"].(string)
 	t.Logf("Resolved DATABASE_URL: %s", resolvedURL)
 	expectedURL := fmt.Sprintf("postgres://myuser:mypassword@%s:5432/mydb", dbIP)
 	if resolvedURL != expectedURL {
