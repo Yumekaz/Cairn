@@ -6,17 +6,17 @@ import (
 
 // Service represents a registered service in the Cairn registry.
 type Service struct {
-	ID               string    `json:"id" db:"id"`
-	Name             string    `json:"name" db:"name"`
-	Kind             string    `json:"kind" db:"kind"`
-	RuntimeBackend   string    `json:"runtime_backend" db:"runtime_backend"`
-	RuntimeID        string    `json:"runtime_id" db:"runtime_id"`
-	CurrentDeployID  string    `json:"current_deploy_id" db:"current_deploy_id"`
-	DesiredState     string    `json:"desired_state" db:"desired_state"`
-	ActualState      string    `json:"actual_state" db:"actual_state"`
-	Route            string    `json:"route" db:"route"`
-	CreatedAt        time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
+	ID              string    `json:"id" db:"id"`
+	Name            string    `json:"name" db:"name"`
+	Kind            string    `json:"kind" db:"kind"`
+	RuntimeBackend  string    `json:"runtime_backend" db:"runtime_backend"`
+	RuntimeID       string    `json:"runtime_id" db:"runtime_id"`
+	CurrentDeployID string    `json:"current_deploy_id" db:"current_deploy_id"`
+	DesiredState    string    `json:"desired_state" db:"desired_state"`
+	ActualState     string    `json:"actual_state" db:"actual_state"`
+	Route           string    `json:"route" db:"route"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // Deploy represents a deploy record for a service.
@@ -87,6 +87,10 @@ type ServiceConfig struct {
 	Restart     *RestartConfig     `yaml:"restart,omitempty" json:"restart,omitempty"`
 	Schedule    string             `yaml:"schedule,omitempty" json:"schedule,omitempty"`
 	Run         string             `yaml:"run,omitempty" json:"run,omitempty"`
+	// User optionally runs the container as "uid[:gid]" (host IDs). Used by
+	// one-off backup/restore tasks so dump files stay owned/readable by the
+	// daemon user instead of root.
+	User string `yaml:"user,omitempty" json:"user,omitempty"`
 }
 
 type PortMapping struct {

@@ -2,11 +2,12 @@ package minidocker
 
 // CreateContainerRequest represents the payload for creating a container in Mini-Docker.
 type CreateContainerRequest struct {
-	Image      string            `json:"Image"`
-	Cmd        []string          `json:"Cmd,omitempty"`
-	Name       string            `json:"name"`
-	Env        []string          `json:"Env,omitempty"`
-	HostConfig CreateHostConfig  `json:"HostConfig,omitempty"`
+	Image      string           `json:"Image"`
+	Cmd        []string         `json:"Cmd,omitempty"`
+	Name       string           `json:"name"`
+	Env        []string         `json:"Env,omitempty"`
+	User       string           `json:"User,omitempty"`
+	HostConfig CreateHostConfig `json:"HostConfig,omitempty"`
 }
 
 // CreateHostConfig represents host-level configuration (e.g. port bindings).
@@ -29,14 +30,14 @@ type CreateContainerResponse struct {
 
 // MiniDockerContainer represents the container data returned by the inspect endpoint.
 type MiniDockerContainer struct {
-	ID        string             `json:"id"`
-	Name      string             `json:"name"`
-	RootFS    string             `json:"rootfs"`
-	Command   []string           `json:"command"`
-	Status    string             `json:"status"` // e.g. "created", "running", "stopped"
-	ExitCode  *int               `json:"exit_code,omitempty"`
-	Network   MiniDockerNetwork  `json:"network"`
-	Volumes   []MiniDockerVolume `json:"volumes,omitempty"`
+	ID       string             `json:"id"`
+	Name     string             `json:"name"`
+	RootFS   string             `json:"rootfs"`
+	Command  []string           `json:"command"`
+	Status   string             `json:"status"` // e.g. "created", "running", "stopped"
+	ExitCode *int               `json:"exit_code,omitempty"`
+	Network  MiniDockerNetwork  `json:"network"`
+	Volumes  []MiniDockerVolume `json:"volumes,omitempty"`
 }
 
 // MiniDockerNetwork represents the network config inside MiniDockerContainer.

@@ -63,6 +63,7 @@ func (a *MiniDockerAdapter) CreateContainer(ctx context.Context, cfg *api.Servic
 		Cmd:   cfg.Command,
 		Name:  name,
 		Env:   envs,
+		User:  cfg.User,
 		HostConfig: CreateHostConfig{
 			PortBindings: portBindings,
 			Binds:        binds,

@@ -600,7 +600,10 @@ func (s *Server) performPostgresDumpBackup(vol *api.Volume, dbService *api.Servi
 	os.Remove(dumpFileHostPath)
 
 	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
+	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
+	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Name:    dbServiceConfig.Name,
 		Kind:    dbServiceConfig.Kind,
 		Image:   dbServiceConfig.Image,
@@ -626,24 +629,7 @@ func (s *Server) performPostgresDumpBackup(vol *api.Volume, dbService *api.Servi
 		return "", 0, fmt.Errorf("failed to start backup task container: %w", err)
 	}
 
-	var exitCode int
-	var runErr error
-	for {
-		info, err := s.runtime.InspectContainer(context.Background(), taskID)
-		if err != nil {
-			runErr = err
-			break
-		}
-		if info.State == runtime.StateStopped || info.State == runtime.StateError {
-			if info.ExitCode != nil {
-				exitCode = *info.ExitCode
-			} else {
-				exitCode = -1
-			}
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	exitCode, runErr := s.waitForTaskExit(context.Background(), taskID, backupTaskTimeout)
 
 	if runErr != nil {
 		return "", 0, fmt.Errorf("backup execution context failed: %w", runErr)
@@ -680,7 +666,10 @@ func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service,
 	os.Remove(dumpFileHostPath)
 
 	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
+	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
+	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Name:    dbServiceConfig.Name,
 		Kind:    dbServiceConfig.Kind,
 		Image:   dbServiceConfig.Image,
@@ -706,24 +695,7 @@ func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service,
 		return "", 0, fmt.Errorf("failed to start backup task container: %w", err)
 	}
 
-	var exitCode int
-	var runErr error
-	for {
-		info, err := s.runtime.InspectContainer(context.Background(), taskID)
-		if err != nil {
-			runErr = err
-			break
-		}
-		if info.State == runtime.StateStopped || info.State == runtime.StateError {
-			if info.ExitCode != nil {
-				exitCode = *info.ExitCode
-			} else {
-				exitCode = -1
-			}
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	exitCode, runErr := s.waitForTaskExit(context.Background(), taskID, backupTaskTimeout)
 
 	if runErr != nil {
 		return "", 0, fmt.Errorf("backup execution context failed: %w", runErr)
@@ -762,7 +734,10 @@ func (s *Server) performMongoDumpBackup(vol *api.Volume, dbService *api.Service,
 
 	taskName := fmt.Sprintf("cairn-%s-backup-task-%s", dbService.Name, backupID[:8])
 
+	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
+	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Name:    dbServiceConfig.Name,
 		Kind:    dbServiceConfig.Kind,
 		Image:   dbServiceConfig.Image,
@@ -785,24 +760,7 @@ func (s *Server) performMongoDumpBackup(vol *api.Volume, dbService *api.Service,
 		return "", 0, fmt.Errorf("failed to start backup task container: %w", err)
 	}
 
-	var exitCode int
-	var runErr error
-	for {
-		info, err := s.runtime.InspectContainer(context.Background(), taskID)
-		if err != nil {
-			runErr = err
-			break
-		}
-		if info.State == runtime.StateStopped || info.State == runtime.StateError {
-			if info.ExitCode != nil {
-				exitCode = *info.ExitCode
-			} else {
-				exitCode = -1
-			}
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	exitCode, runErr := s.waitForTaskExit(context.Background(), taskID, backupTaskTimeout)
 
 	if runErr != nil {
 		return "", 0, fmt.Errorf("backup execution context failed: %w", runErr)
@@ -1477,7 +1435,10 @@ func (s *Server) performPostgresRestore(ctx context.Context, vol *api.Volume, se
 	}
 
 	taskName := fmt.Sprintf("cairn-%s-restore-task-%s", service.Name, backup.ID[:8])
+	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
+	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Name:    cfg.Name,
 		Kind:    cfg.Kind,
 		Image:   cfg.Image,
@@ -1503,24 +1464,7 @@ func (s *Server) performPostgresRestore(ctx context.Context, vol *api.Volume, se
 		return fmt.Errorf("failed to start restore task container: %w", err)
 	}
 
-	var exitCode int
-	var runErr error
-	for {
-		info, err := s.runtime.InspectContainer(ctx, taskID)
-		if err != nil {
-			runErr = err
-			break
-		}
-		if info.State == runtime.StateStopped || info.State == runtime.StateError {
-			if info.ExitCode != nil {
-				exitCode = *info.ExitCode
-			} else {
-				exitCode = -1
-			}
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	exitCode, runErr := s.waitForTaskExit(ctx, taskID, backupTaskTimeout)
 
 	if runErr != nil {
 		return fmt.Errorf("restore execution context failed: %w", runErr)
@@ -1564,7 +1508,10 @@ func (s *Server) performMongoRestore(ctx context.Context, vol *api.Volume, servi
 
 	taskName := fmt.Sprintf("cairn-%s-restore-task-%s", service.Name, backup.ID[:8])
 
+	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
+	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
+		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Name:    cfg.Name,
 		Kind:    cfg.Kind,
 		Image:   cfg.Image,
@@ -1587,24 +1534,7 @@ func (s *Server) performMongoRestore(ctx context.Context, vol *api.Volume, servi
 		return fmt.Errorf("failed to start restore task container: %w", err)
 	}
 
-	var exitCode int
-	var runErr error
-	for {
-		info, err := s.runtime.InspectContainer(ctx, taskID)
-		if err != nil {
-			runErr = err
-			break
-		}
-		if info.State == runtime.StateStopped || info.State == runtime.StateError {
-			if info.ExitCode != nil {
-				exitCode = *info.ExitCode
-			} else {
-				exitCode = -1
-			}
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	exitCode, runErr := s.waitForTaskExit(ctx, taskID, backupTaskTimeout)
 
 	if runErr != nil {
 		return fmt.Errorf("restore execution context failed: %w", runErr)
@@ -1752,7 +1682,10 @@ func (s *Server) handleRunOneOff(w http.ResponseWriter, r *http.Request) {
 
 	// Construct task container config
 	taskName := fmt.Sprintf("cairn-%s-oneoff-%s", svc.Name, runID[:8])
+	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
+	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
+		User:        fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		Name:        cfg.Name,
 		Kind:        cfg.Kind,
 		Image:       cfg.Image,
