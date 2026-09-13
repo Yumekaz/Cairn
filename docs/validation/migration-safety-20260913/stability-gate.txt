@@ -1,0 +1,17 @@
+[gate] ROOT=/home/yumekaz/Desktop/SERVER log=/tmp/cairn-proof-runs/stability_gate_20260913-102926.log N=1
+[gate] full Closeout A entrypoint: ./scripts/prove_mlp.sh
+[gate] === unit packages ===
+ok  	github.com/yumekaz/cairn/internal/deploymeta	0.023s
+ok  	github.com/yumekaz/cairn/internal/daemon	1.758s
+ok  	github.com/yumekaz/cairn/internal/config	0.013s
+ok  	github.com/yumekaz/cairn/internal/preflight	0.035s
+ok  	github.com/yumekaz/cairn/internal/store	0.055s
+[gate] GREEN unit packages
+[gate] === integration TestDuraFlowCrashRecovery ===
+ok  	github.com/yumekaz/cairn/tests/integration	1.025s
+[gate] GREEN integration TestDuraFlowCrashRecovery
+[gate] === bash -n scripts ===
+[gate] GREEN bash -n scripts
+[gate] SKIP_LIVE=1 — unit/syntax only
+[gate] ALL GREEN (partial)
+[gate] for full Closeout A: ./scripts/prove_mlp.sh

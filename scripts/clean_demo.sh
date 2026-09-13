@@ -58,7 +58,8 @@ cairn deploy "${ROOT}/examples/counter-api"
 
 LOG "ps / status"
 cairn ps
-curl -sf -m 5 http://127.0.0.1:8080/index.html | head -c 200
+INITIAL_BODY="$(curl -sf -m 5 http://127.0.0.1:8080/index.html)"
+printf '%s' "${INITIAL_BODY:0:200}"
 echo
 
 LOG "Mutate volume + restart"
@@ -109,7 +110,7 @@ assert_http_body STATE_OK
 LOG "restore: OK"
 
 LOG "Dashboard"
-DASH_HTML="$(curl -sf -m 5 -L http://127.0.0.1:2476/dashboard/ | head -c 4000)"
+DASH_HTML="$(curl -sf -m 5 -L http://127.0.0.1:2476/dashboard/)"
 echo "$DASH_HTML" | grep -qi 'Cairn' || die "dashboard missing Cairn title/content"
 LOG "dashboard: OK"
 

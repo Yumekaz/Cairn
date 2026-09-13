@@ -181,6 +181,8 @@ func (s *Store) ListDeploys(serviceID string) ([]*api.Deploy, error) {
 
 // UpdateDeploy updates an existing deploy.
 func (s *Store) UpdateDeploy(d *api.Deploy) error {
+	// Migration side effects are irreversible evidence. Stale workflow input
+	// must never clear the marker when updating status or health.
 	var completedAt interface{}
 	if d.CompletedAt != nil {
 		completedAt = *d.CompletedAt
@@ -191,7 +193,7 @@ func (s *Store) UpdateDeploy(d *api.Deploy) error {
 			status = ?,
 			stage = ?,
 			health_status = ?,
-			state_touched = ?,
+			state_touched = state_touched OR ?,
 			completed_at = ?,
 			failure_reason = ?
 		WHERE id = ?`,

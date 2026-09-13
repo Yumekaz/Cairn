@@ -1,0 +1,155 @@
+time=2026-09-13T10:29:42.393+05:30 level=INFO msg="Starting Cairn daemon" version=0.1.0 socket=/home/yumekaz/.cairn/cairnd.sock db=/home/yumekaz/.cairn/cairn.db
+time=2026-09-13T10:29:42.449+05:30 level=INFO msg="Daemon listening on Unix socket" path=/home/yumekaz/.cairn/cairnd.sock
+time=2026-09-13T10:29:42.452+05:30 level=INFO msg="Starting background cron scheduler loop..."
+time=2026-09-13T10:29:42.520+05:30 level=INFO msg="cairnd: recovery: duraflow incomplete runs=0"
+time=2026-09-13T10:29:42.581+05:30 level=INFO msg="cairnd: Starting service/runtime reconciliation loop..."
+time=2026-09-13T10:29:42.581+05:30 level=INFO msg="cairnd: Starting metadata auto-backup loop..."
+time=2026-09-13T10:29:42.582+05:30 level=INFO msg="cairnd: Dashboard and API TCP server listening on http://127.0.0.1:2476"
+time=2026-09-13T10:29:42.594+05:30 level=INFO msg="cairnd: Service counter-api container 0778ec8802d3 is stopped. Restarting..."
+2026/09/13 10:29:42 [Kaiii/n5oOOCnT4b-000001] "GET http://localhost/status HTTP/1.1" from @ - 200 106B in 38.87108ms
+2026/09/13 10:29:42 [Kaiii/n5oOOCnT4b-000002] "GET http://localhost/services HTTP/1.1" from @ - 200 1139B in 401.867µs
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step validate_config (attempt 0) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step validate_config of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step save_config_on_disk (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step save_config_on_disk of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step pre_deploy_backup (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step pre_deploy_backup of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_migration (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step run_migration of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step create_container (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step create_container of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step start_container (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step start_container of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_health_check (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step run_health_check of run a86d7009-5557-4831-825a-50e875a11ac7
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step route_traffic_and_cleanup (attempt 1) of run a86d7009-5557-4831-825a-50e875a11ac7
+time=2026-09-13T10:29:44.377+05:30 level=INFO msg="cairnd: deploy a315a7e0-cb31-46e9-84eb-c205fa1667f6 marked success (route_traffic)"
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step route_traffic_and_cleanup of run a86d7009-5557-4831-825a-50e875a11ac7
+2026/09/13 10:29:55 [Kaiii/n5oOOCnT4b-000003] "POST http://localhost/services HTTP/1.1" from @ - 201 384B in 12.661419871s
+2026/09/13 10:29:56 [Kaiii/n5oOOCnT4b-000004] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 4.467548ms
+2026/09/13 10:29:57 [Kaiii/n5oOOCnT4b-000005] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 4.701787ms
+2026/09/13 10:29:57 [Kaiii/n5oOOCnT4b-000006] "GET http://localhost/services HTTP/1.1" from @ - 200 1139B in 290.578µs
+2026/09/13 10:30:08 [Kaiii/n5oOOCnT4b-000007] "POST http://localhost/services/counter-api/restart HTTP/1.1" from @ - 200 383B in 11.156571922s
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000008] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 6.204118ms
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000009] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 6.313189ms
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000010] "GET http://localhost/services HTTP/1.1" from @ - 200 1138B in 497.677µs
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000011] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 5.254582ms
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000012] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 3.978491ms
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000013] "GET http://localhost/services HTTP/1.1" from @ - 200 1138B in 257.827µs
+2026/09/13 10:30:10 [Kaiii/n5oOOCnT4b-000014] "GET http://localhost/status HTTP/1.1" from @ - 200 107B in 5.741066ms
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step validate_config (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step validate_config of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step save_config_on_disk (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step save_config_on_disk of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step pre_deploy_backup (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step pre_deploy_backup of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_migration (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step run_migration of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step create_container (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step create_container of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step start_container (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step start_container of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_health_check (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step run_health_check of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step route_traffic_and_cleanup (attempt 1) of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+time=2026-09-13T10:30:12.228+05:30 level=INFO msg="cairnd: deploy 378f798f-a401-489e-9f51-74e2f3f9d063 marked success (route_traffic)"
+time=2026-09-13T10:30:12.930+05:30 level=INFO msg="cairnd: Corrupted state: found dangling untracked container cairn-counter-api-a315a7e0 (b35cf7149232). Reconciling cleanup..."
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step route_traffic_and_cleanup of run 7aea26db-d1e1-4ec3-bb09-bd86df2b89b5
+2026/09/13 10:30:23 [Kaiii/n5oOOCnT4b-000015] "POST http://localhost/services HTTP/1.1" from @ - 201 384B in 12.638531411s
+2026/09/13 10:30:23 [Kaiii/n5oOOCnT4b-000016] "GET http://localhost/services HTTP/1.1" from @ - 200 1139B in 293.322µs
+2026/09/13 10:30:34 [Kaiii/n5oOOCnT4b-000017] "POST http://localhost/services/counter-api/restart HTTP/1.1" from @ - 200 384B in 11.185347789s
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_backup (attempt 0) of run 25300463-3111-4dbe-89ec-be66d4a34eef
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step run_backup of run 25300463-3111-4dbe-89ec-be66d4a34eef
+2026/09/13 10:30:37 [Kaiii/n5oOOCnT4b-000018] "POST http://localhost/volumes/counter-data/backups HTTP/1.1" from @ - 201 422B in 1.537275013s
+2026/09/13 10:30:37 [Kaiii/n5oOOCnT4b-000019] "GET http://localhost/services/counter-api HTTP/1.1" from @ - 200 384B in 372.199µs
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step validate_config (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step validate_config of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step save_config_on_disk (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step save_config_on_disk of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step pre_deploy_backup (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step pre_deploy_backup of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_migration (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step run_migration of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step create_container (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step create_container of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step start_container (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step start_container of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step run_health_check (attempt 1) of run 76bc1cee-5075-4d98-89ad-158b18ce64c5
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 completed step run_health_check of run 76bc1cee-5075-4d98-89ad-158b18ce64c5 with error: step execution failed: container health checks failed: health check failed for http://10.0.0.3:80/nonexistent.html: unhealthy HTTP status: 404
+time=2026-09-13T10:30:50.804+05:30 level=INFO msg="cairnd: runDeployWorkflowSync failed: workflow failed: container health checks failed: health check failed for http://10.0.0.3:80/nonexistent.html: unhealthy HTTP status: 404"
+2026/09/13 10:30:50 [Kaiii/n5oOOCnT4b-000020] "POST http://localhost/services HTTP/1.1" from @ - 500 168B in 13.632901716s
+2026/09/13 10:30:50 [Kaiii/n5oOOCnT4b-000021] "GET http://localhost/services/counter-api HTTP/1.1" from @ - 200 384B in 289.413µs
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step stop_container (attempt 1) of run 86c092df-2cf9-4752-a282-07c691b657bf
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step stop_container of run 86c092df-2cf9-4752-a282-07c691b657bf
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step verify_and_extract (attempt 1) of run 86c092df-2cf9-4752-a282-07c691b657bf
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step verify_and_extract of run 86c092df-2cf9-4752-a282-07c691b657bf
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 starting step start_container (attempt 1) of run 86c092df-2cf9-4752-a282-07c691b657bf
+Worker 64f0e1f9-f6a0-4606-839b-7a01815d67b2 successfully completed step start_container of run 86c092df-2cf9-4752-a282-07c691b657bf
+2026/09/13 10:31:02 [Kaiii/n5oOOCnT4b-000022] "POST http://localhost/volumes/counter-data/restore HTTP/1.1" from @ - 200 22B in 11.716155827s
+2026/09/13 10:31:03 [Kaiii/n5oOOCnT4b-000023] "GET http://127.0.0.1:2476/dashboard/ HTTP/1.1" from 127.0.0.1:42234 - 200 20932B in 6.636793ms
+2026/09/13 10:31:03 [Kaiii/n5oOOCnT4b-000024] "GET http://localhost/events HTTP/1.1" from @ - 200 1260546B in 59.032138ms
+p '8e159ee9-130d-437c-9aee-2bd47aef8bfb'!
+[demo] restore: OK
+[demo] Dashboard
+[demo] dashboard: OK
+[demo] Event story (MLP §17 subset)
+=== Event Timeline ===
+TIMESTAMP             TYPE               MESSAGE
+2026-09-13 10:31:02   RestoreCompleted   Restore completed for volume counter-data
+2026-09-13 10:31:02   BackupRestored     Successfully restored volume counter-data from backup 8e159ee9-130d-437c-9aee-2bd47aef8bfb
+2026-09-13 10:30:50   RestoreStarted     Restoring volume counter-data from backup 8e159ee9-130d-437c-9aee-2bd47aef8bfb
+2026-09-13 10:30:50   DeployFailed       Deployment failed: Health check failed: health check failed for http://10.0.0.3:80/nonexistent.html: unhealthy HTTP status: 404. Logs:
+2026-09-13T10:30:37.570 Mounting volume: /home/yumekaz/.cairn/volumes/counter-data -> /var/lib/mini-docker/overlay/0f56fe3b9387/merged/www (rw)
+2026-09-13T10:30:37.580 Starting: /bin/busybox httpd -f -p 80 -h /www
+
+2026-09-13 10:30:50   RoutePreserved           Route preserved on failed deploy; current_deploy_id=378f798f-a401-489e-9f51-74e2f3f9d063
+2026-09-13 10:30:50   HealthCheckFailed        Health check failed for counter-api: health check failed for http://10.0.0.3:80/nonexistent.html: unhealthy HTTP status: 404
+2026-09-13 10:30:37   RuntimeCreateCompleted   Runtime candidate created: cairn-counter-api-912b1c01 (id 0f56fe3b9387)
+2026-09-13 10:30:37   RuntimeCreateStarted     Creating runtime candidate cairn-counter-api-912b1c01 for service counter-api
+2026-09-13 10:30:37   DeployStarted            Deploying service counter-api (Deploy ID: 912b1c01-62c0-404e-a4ad-6cc519f55895)
+2026-09-13 10:30:37   VolumeAttached           Volume counter-data re-attached to service counter-api at /www
+2026-09-13 10:30:37   BackupCompleted          Backup completed for volume counter-data (ID: 8e159ee9-130d-437c-9aee-2bd47aef8bfb)
+2026-09-13 10:30:37   BackupSucceeded          Successfully completed backup for volume counter-data (ID: 8e159ee9-130d-437c-9aee-2bd47aef8bfb)
+2026-09-13 10:30:35   BackupStarted            Started backup for volume counter-data (ID: 8e159ee9-130d-437c-9aee-2bd47aef8bfb)
+2026-09-13 10:30:34   ServiceRestarted         Restarted service counter-api
+2026-09-13 10:30:23   ServiceStarted           Service counter-api is running (runtime cairn-counter-api-378f798f)
+2026-09-13 10:30:23   DeployCompleted          Deploy completed for service counter-api
+2026-09-13 10:30:23   DeploySucceeded          Successfully deployed service counter-api (container: cairn-counter-api-378f798f)
+2026-09-13 10:30:23   RouteUpdated             Route updated for counter-api → http://localhost:8080
+2026-09-13 10:30:12   HealthCheckPassed        Health check passed for candidate of service counter-api
+2026-09-13 10:30:10   RuntimeCreateCompleted   Runtime candidate created: cairn-counter-api-378f798f (id bddb009085e8)
+2026-09-13 10:30:10   RuntimeCreateStarted     Creating runtime candidate cairn-counter-api-378f798f for service counter-api
+2026-09-13 10:30:10   DeployStarted            Deploying service counter-api (Deploy ID: 378f798f-a401-489e-9f51-74e2f3f9d063)
+2026-09-13 10:30:10   VolumeAttached           Volume counter-data re-attached to service counter-api at /www
+2026-09-13 10:30:08   ServiceRestarted         Restarted service counter-api
+2026-09-13 10:29:55   ServiceStarted           Service counter-api is running (runtime cairn-counter-api-a315a7e0)
+2026-09-13 10:29:55   DeployCompleted          Deploy completed for service counter-api
+2026-09-13 10:29:55   DeploySucceeded          Successfully deployed service counter-api (container: cairn-counter-api-a315a7e0)
+2026-09-13 10:29:55   RouteUpdated             Route updated for counter-api → http://localhost:8080
+2026-09-13 10:29:44   HealthCheckPassed        Health check passed for candidate of service counter-api
+2026-09-13 10:29:43   RuntimeCreateCompleted   Runtime candidate created: cairn-counter-api-a315a7e0 (id b35cf7149232)
+2026-09-13 10:29:43   RuntimeCreateStarted     Creating runtime candidate cairn-counter-api-a315a7e0 for service counter-api
+2026-09-13 10:29:42   ServiceRestarted         Auto-recovered service counter-api (reason=container_stopped, restarts_in_window=1/5)
+2026-09-13 10:29:42   DeployStarted            Deploying service counter-api (Deploy ID: a315a7e0-cb31-46e9-84eb-c205fa1667f6)
+2026-09-13 10:29:42   VolumeAttached           Volume counter-data re-attached to service counter-api at /www
+2026-09-13 10:29:42   DaemonStarted            Cairn daemon started successfully
+2026-09-12 21:11:47   RestoreCompleted         Restore completed for volume counter-data
+2026-09-12 21:11:47   BackupRestored           Successfully restored volume counter-data from backup d0eaac67-4960-4a1d-bacd-fa19f1773c13
+2026-09-12 21:11:35   RestoreStarted           Restoring volume counter-data from backup d0eaac67-4960-4a1d-bacd-fa19f1773c13
+2026-09-12 21:11:35   DeployFailed             Deployment failed: Health check failed: health check failed for http://10.0.0.3:80/nonexistent.html: unhealthy HTTP status: 404. Logs:
+2026-09-12T21:11:22.314 Mounting volume: /home/yumekaz/.cairn/volumes/counter-data -> /var/lib/mini-docker/overlay/40e418344d4e/merged/www (rw)
+2026-09-12T21:11:22.317 Starting: /bin/busybox httpd -f -p 80 -h /www
+
+2026-09-12 21:11:35   RoutePreserved           Route preserved on failed deploy; current_deploy_id=3c9de33b-5499-4d5d-8f8b-70f873cadd9d
+2026-09-12 21:11:35   HealthCheckFailed        Health check failed for counter-api: health check failed for http://10.0.0.3:80/nonexistent.html: unhealthy HTTP status: 404
+2026-09-12 21:11:22   RuntimeCreateCompleted   Runtime candidate created: cairn-counter-api-7bdb6ff1 (id 40e418344d4e)
+[demo] alias DeployCompleted: present
+[demo] alias BackupCompleted: present
+[demo] event story: OK
+[demo] 
+[demo] === CLEAN DEMO PASSED ===
+[demo] Dashboard: http://127.0.0.1:2476/dashboard/
+[demo] Service:   http://127.0.0.1:8080/
+counter-api healthy a315a7e0-cb31-46e9-84eb-c205fa1667f6 b'STATE_OK\n'
+[matrix] GREEN F6
+[matrix] ALL REQUESTED CASES GREEN

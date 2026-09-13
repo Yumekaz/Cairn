@@ -245,6 +245,25 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 	svc := &input.Service
 
 	if cfg.Migration != "" {
+		// Persist uncertainty before any external side effect. A replay of this
+		// step cannot distinguish a completed migration from a partial one.
+		persisted, err := s.store.GetDeploy(deploy.ID)
+		if err != nil {
+			return err
+		}
+		if persisted == nil {
+			return fmt.Errorf("migration deploy %s is missing", deploy.ID)
+		}
+		if persisted.StateTouched {
+			reason := "Migration outcome is uncertain; automatic replay blocked. Inspect the migration task and data before deploying again."
+			s.failDeploy(persisted, svc, reason)
+			return fmt.Errorf("%s", reason)
+		}
+		persisted.StateTouched = true
+		if err := s.store.UpdateDeploy(persisted); err != nil {
+			return err
+		}
+		deploy.StateTouched = true
 		taskName := fmt.Sprintf("cairn-%s-task-%s", svc.Name, deploy.ID[:8])
 		taskCfg := &api.ServiceConfig{
 			Name:        cfg.Name,
@@ -273,6 +292,7 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 		// Wait for migration task container to exit
 		var exitCode int
 		var runErr error
+	migrationWait:
 		for {
 			info, err := s.runtime.InspectContainer(ctx.Context, taskID)
 			if err != nil {
@@ -290,14 +310,14 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 			select {
 			case <-ctx.Context.Done():
 				runErr = ctx.Context.Err()
-				break
+				break migrationWait
 			case <-time.After(200 * time.Millisecond):
 			}
 		}
 
 		if runErr != nil {
 			// Do not remove the migration container or fail the deploy on daemon
-			// kill — leave state for resume after restart.
+			// kill — preserve evidence; replay will be blocked after restart.
 			if isWorkflowInterrupted(runErr) {
 				return runErr
 			}

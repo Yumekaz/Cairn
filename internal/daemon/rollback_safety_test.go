@@ -25,6 +25,12 @@ func withChiURLParam(req *http.Request, key, value string) *http.Request {
 }
 
 func TestRollbackBlockedEmitsEvent(t *testing.T) {
+	for _, status := range []string{"success", "failed", "running"} {
+		t.Run(status, func(t *testing.T) { testRollbackBlockedStatus(t, status) })
+	}
+}
+
+func testRollbackBlockedStatus(t *testing.T, status string) {
 	s, st, cleanup := setupDaemonStore(t)
 	defer cleanup()
 
@@ -56,7 +62,7 @@ func TestRollbackBlockedEmitsEvent(t *testing.T) {
 	}
 	if err := st.CreateDeploy(&api.Deploy{
 		ID: touchedID, ServiceID: svcID, Version: "v2", SourcePath: "inline",
-		Status: "success", Stage: "completed", HealthStatus: "healthy",
+		Status: status, Stage: "completed", HealthStatus: "healthy",
 		StateTouched: true, PreviousDeployID: oldID, CreatedAt: now.Add(-time.Minute),
 	}); err != nil {
 		t.Fatal(err)

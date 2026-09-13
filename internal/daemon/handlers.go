@@ -893,13 +893,13 @@ func (s *Server) handleRollbackService(w http.ResponseWriter, r *http.Request) {
 	// Find intervening deploys with state_touched = true
 	var dangerousDeploys []*api.Deploy
 	for _, d := range deploys {
-		if d.Status == "success" && d.StateTouched && d.CreatedAt.After(targetDeploy.CreatedAt) {
+		if d.StateTouched && d.CreatedAt.After(targetDeploy.CreatedAt) {
 			dangerousDeploys = append(dangerousDeploys, d)
 		}
 	}
 
 	if len(dangerousDeploys) > 0 && !req.Force {
-		msg := fmt.Sprintf("Rollback target '%s' is unsafe: %d intervening successful deployment(s) executed migrations and modified state since then (including deploy '%s'). Proceeding might cause data or schema mismatch.",
+		msg := fmt.Sprintf("Rollback target '%s' is unsafe: %d intervening deployment(s) may have modified state since then (including deploy '%s'). Proceeding might cause data or schema mismatch.",
 			targetDeploy.ID[:8], len(dangerousDeploys), dangerousDeploys[0].ID[:8])
 		_ = s.store.CreateEvent(&api.Event{
 			ID:        uuid.New().String(),

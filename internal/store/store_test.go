@@ -168,8 +168,8 @@ func TestDeploysCRUD(t *testing.T) {
 	if gotUpdated.Status != "success" {
 		t.Errorf("expected status 'success', got '%s'", gotUpdated.Status)
 	}
-	if gotUpdated.StateTouched != false {
-		t.Errorf("expected StateTouched to be updated to false, got %t", gotUpdated.StateTouched)
+	if !gotUpdated.StateTouched {
+		t.Error("migration uncertainty must survive stale updates that set StateTouched=false")
 	}
 }
 

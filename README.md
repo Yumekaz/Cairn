@@ -46,6 +46,11 @@ See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) and [docs/quickstart.md](
 
 DuraFlow resumes unfinished work; failed candidates do not steal `current_deploy_id`; traffic stays on the last healthy release.
 
+Migration exception: if execution may have started but completion was not durably
+recorded, Cairn blocks automatic replay and requires operator inspection. Failed
+and interrupted migrations also block unsafe rollback. Preserving the old route
+does not establish database compatibility; see [migration safety and recovery](docs/MIGRATION_SAFETY.md).
+
 ### Prove it (one command)
 
 Sibling checkouts of **Cairn**, **DURAFLOW**, and **Mini-Docker** are required. Live proofs need **privileged Mini-Docker** (sudo/root for daemon + networking). Set env (or let `scripts/lib/runtime.sh` discover rootfs):
