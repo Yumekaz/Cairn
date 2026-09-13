@@ -43,6 +43,8 @@ esac
 
 # Start slow migration deploy in background
 SLOW="${ROOT}/examples/counter-api/cairn_slow_migration.yaml"
+MIGRATION_PROOF="${HOME}/.cairn/volumes/counter-data/migration-proof-executions"
+rm -f "$MIGRATION_PROOF"
 log "Starting slow-migration deploy in background..."
 set +e
 cairn deploy "$SLOW" >"${TMPDIR:-/tmp}/cairn-slow-deploy.out" 2>&1 &
@@ -55,15 +57,10 @@ for i in $(seq 1 40); do
   if grep -q 'Successfully deployed\|Deployment failed\|workflow failed' "${TMPDIR:-/tmp}/cairn-slow-deploy.out" 2>/dev/null; then
     die "deploy finished before we could kill cairnd — see ${TMPDIR:-/tmp}/cairn-slow-deploy.out"
   fi
-  # migration container names contain -task-
-  if command -v python3 >/dev/null; then
-    # best-effort: if cairnd log mentions migration / sleep
-    if tail -n 30 "${HOME}/.cairn/cairnd.log" 2>/dev/null | grep -qiE 'migration|run_migration|sleep'; then
-      break
-    fi
-  fi
+  [[ -s "$MIGRATION_PROOF" ]] && break
   sleep 0.5
 done
+[[ -s "$MIGRATION_PROOF" ]] || die "migration never performed its observable write"
 # Always give migration a moment to start
 sleep 3
 
@@ -167,6 +164,13 @@ assert st and st[0] == "success", st
 # If current still baseline, that is fail-clean recovery; if newer success, resume promoted.
 print("baseline", baseline, "current", svc[0])
 print("METADATA_RECOVERY_OK")
+latest=con.execute("SELECT status,state_touched,failure_reason FROM deploys WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,)).fetchone()
+assert latest[0]=='failed' and latest[1]==1 and 'automatic replay blocked' in latest[2], latest
+assert svc[0]==baseline, (svc, baseline)
+with open(os.path.expanduser('~/.cairn/volumes/counter-data/migration-proof-executions')) as f:
+    executions=f.read().splitlines()
+assert executions==['executed'], executions
+print('MIGRATION_EXECUTED_ONCE_REPLAY_BLOCKED')
 PY
 
 log "Events (tail):"

@@ -175,6 +175,7 @@ clone_if_missing() {
   local dest="$1"
   local remote="$2"
   local label="$3"
+  local revision="${4:-}"
   if [[ -d "$dest/.git" ]] || [[ -f "$dest/go.mod" ]] || [[ -d "$dest/mini_docker" ]] || [[ -d "$dest/rootfs" ]]; then
     ok "skip clone $label (already present at $dest)"
     return 0
@@ -185,6 +186,10 @@ clone_if_missing() {
   log "Cloning $label → $dest"
   log "  remote: $remote"
   git clone --depth 1 "$remote" "$dest" || fail "failed to clone $label from $remote"
+  if [[ -n "$revision" ]]; then
+    git -C "$dest" fetch --depth 1 origin "$revision" || fail "cannot fetch pinned $label"
+    git -C "$dest" checkout --detach "$revision" || fail "cannot select pinned $label"
+  fi
   ok "cloned $label"
 }
 
@@ -195,8 +200,11 @@ else
   ok "skip clone Cairn (already present at $CAIRN_DIR)"
 fi
 
-clone_if_missing "$PARENT/DURAFLOW" "$DURAFLOW_REMOTE" "DURAFLOW"
-clone_if_missing "$PARENT/Mini-Docker" "$MINI_DOCKER_REMOTE" "Mini-Docker"
+DF_REV="$(awk '$1=="DURAFLOW" {print $2}' "$CAIRN_DIR/stack.lock")"
+MD_REV="$(awk '$1=="Mini-Docker" {print $2}' "$CAIRN_DIR/stack.lock")"
+clone_if_missing "$PARENT/DURAFLOW" "$DURAFLOW_REMOTE" "DURAFLOW" "$DF_REV"
+clone_if_missing "$PARENT/Mini-Docker" "$MINI_DOCKER_REMOTE" "Mini-Docker" "$MD_REV"
+bash "$CAIRN_DIR/scripts/verify_stack.sh" || fail "Sibling checkouts differ from stack.lock; reconcile them before installation (existing work is not changed)."
 
 # Sanity: siblings exist relative to Cairn root
 [[ -f "$CAIRN_DIR/go.mod" ]] || fail "Cairn go.mod missing at $CAIRN_DIR"

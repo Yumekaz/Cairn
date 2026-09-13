@@ -4,7 +4,7 @@ name: counter-api
 kind: web
 image: ${CAIRN_ROOTFS}
 command: ["/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"]
-migration: "sleep 25"
+migration: "echo executed >> /www/migration-proof-executions; sleep 25"
 ports:
   - host: 8080
     container: 80

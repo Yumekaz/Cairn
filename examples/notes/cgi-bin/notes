@@ -1,0 +1,15 @@
+#!/bin/sh
+# Local single-host notes journal. Plain-text output; no HTML rendering.
+case "$REQUEST_METHOD" in
+  GET) printf 'Content-Type: text/plain\r\n\r\n'; cat /data/notes.txt 2>/dev/null; exit 0 ;;
+  POST)
+    case "$CONTENT_LENGTH" in ''|*[!0-9]*) printf 'Status: 400 Bad Request\r\n\r\n'; exit 0;; esac
+    if [ "$CONTENT_LENGTH" -gt 4096 ]; then printf 'Status: 413 Content Too Large\r\n\r\n'; exit 0; fi
+    if ! mkdir /data/write.lock 2>/dev/null; then printf 'Status: 503 Busy\r\n\r\n'; exit 0; fi
+    trap 'rmdir /data/write.lock' EXIT
+    if ! dd bs=1 count="$CONTENT_LENGTH" >> /data/notes.txt 2>/dev/null; then printf 'Status: 500 Write Failed\r\n\r\n'; exit 0; fi
+    printf '\n' >> /data/notes.txt
+    sync
+    printf 'Status: 201 Created\r\nContent-Type: text/plain\r\n\r\nSaved\n' ;;
+  *) printf 'Status: 405 Method Not Allowed\r\n\r\n' ;;
+esac

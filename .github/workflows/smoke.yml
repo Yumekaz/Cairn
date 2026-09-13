@@ -19,10 +19,17 @@ jobs:
           path: Cairn
 
       # go.mod: replace github.com/yumekaz/duraflow => ../DURAFLOW
+      - name: Read pinned DuraFlow revision
+        id: stack
+        run: |
+          revision=$(awk '$1=="DURAFLOW" {print $2}' stack.lock)
+          test "${#revision}" -eq 40
+          echo "duraflow=$revision" >> "$GITHUB_OUTPUT"
       - name: Checkout DuraFlow (sibling)
         uses: actions/checkout@v4
         with:
           repository: Yumekaz/DURAFLOW
+          ref: ${{ steps.stack.outputs.duraflow }}
           path: DURAFLOW
 
       - uses: actions/setup-go@v5

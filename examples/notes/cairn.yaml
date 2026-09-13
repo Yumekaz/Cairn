@@ -1,0 +1,21 @@
+name: notes
+kind: web
+image: ${CAIRN_ROOTFS}
+command: ["/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"]
+ports:
+  - host: 8088
+    container: 80
+volumes:
+  - name: notes-code
+    mount_path: /www
+  - name: notes-data
+    mount_path: /data
+healthcheck:
+  http_path: /cgi-bin/notes
+  interval: 2s
+  timeout: 1s
+  retries: 3
+  startup_grace: 1s
+restart:
+  policy: on-failure
+  max_retries: 3

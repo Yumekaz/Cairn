@@ -221,6 +221,12 @@ PY
   log "GREEN F4"
 }
 
+run_F5Archive() {
+  log "=== F5 isolated backup-process SIGKILL + startup repair ==="
+  go test ./internal/daemon -run '^TestBackupProcessCrashRecovery$' -count=1 -v >>"$LOG" 2>&1
+  log "GREEN F5 (production archive/recovery functions, isolated subprocess; not live cairnd HTTP)"
+}
+
 run_F5() {
   log "=== F5 backup interrupt (SIGKILL mid-backup) ==="
   ensure_minidocker
@@ -261,6 +267,13 @@ PY
   esac
   assert_counter_healthy >>"$LOG"
 
+  # A test-only FIFO holds the real archive open after preceding files have
+  # produced bytes. No timing race or production daemon hook is needed.
+  F5_BARRIER_DIR="$(mktemp -d "$VOL_DIR/zz-f5-barrier.XXXXXX")"
+  F5_FIFO="$F5_BARRIER_DIR/hold"
+  mkfifo "$F5_FIFO"
+  trap 'rm -f "$F5_FIFO"; rmdir "$F5_BARRIER_DIR"' EXIT
+
   # Snapshot pre-interrupt backup IDs so we can identify the interrupted attempt.
   PRE_IDS="$(python3 - <<'PY'
 import sqlite3, os
@@ -278,13 +291,13 @@ PY
 
   # Wait until a new non-terminal backup row exists (proof we hit mid-flight).
   SAW_PENDING=0
-  for _ in $(seq 1 80); do
+  for _ in $(seq 1 600); do
     PENDING_NOW="$(python3 - <<PY
 import sqlite3, os
 pre=set("${PRE_IDS}".split(",")) if "${PRE_IDS}" else set()
 con=sqlite3.connect(os.path.expanduser("~/.cairn/cairn.db"))
-rows=list(con.execute("SELECT id, status FROM backups WHERE status NOT IN ('success','failed')"))
-new=[r for r in rows if r[0] not in pre]
+rows=list(con.execute("SELECT id, status, backup_path FROM backups WHERE status NOT IN ('success','failed')"))
+new=[r for r in rows if r[0] not in pre and r[2] and os.path.isfile(r[2]) and os.path.getsize(r[2]) > 0]
 print(len(new))
 if new:
     print(new[0][0], new[0][1])
@@ -296,14 +309,15 @@ PY
       log "Saw in-flight backup: $(printf '%s\n' "$PENDING_NOW" | sed -n '2p')"
       break
     fi
-    # If backup already finished success before we could kill, still proceed to kill
-    # (consistency checks below still hold) but note soft path.
+    # A fast completion is a failed interruption proof, never a green result.
     if ! kill -0 "$BPID" 2>/dev/null; then
       log "backup CLI exited before pending observed (fast path)"
       break
     fi
     sleep 0.05
   done
+
+  [[ "$SAW_PENDING" == "1" ]] || die "F5: never observed in-flight archive bytes; refusing a false-green interruption proof"
 
   CAIRND_PID=""
   if [[ -f "${HOME}/.cairn/cairnd.pid" ]]; then
@@ -313,9 +327,7 @@ PY
     log "SIGKILL cairnd pid=$CAIRND_PID mid-backup (SAW_PENDING=$SAW_PENDING)"
     kill -KILL "$CAIRND_PID" 2>/dev/null || true
   else
-    # Fallback: kill by process name if pidfile stale
-    log "pidfile missing/stale; SIGKILL any cairnd"
-    pkill -KILL -x cairnd 2>/dev/null || true
+    die "F5: missing/live pidfile required; refusing to kill unrelated daemons"
   fi
   wait "$BPID" 2>/dev/null || true
   sleep 0.5
@@ -324,6 +336,9 @@ PY
     die "F5: cairnd pid $CAIRND_PID still alive after SIGKILL"
   fi
 
+  rm -f "$F5_FIFO"
+  rmdir "$F5_BARRIER_DIR"
+  trap - EXIT
   ensure_cairnd
   # Allow failIncompleteBackupsOnStartup + optional DuraFlow re-run to settle.
   # Poll until no non-terminal backup rows remain (deadline ~20s).
@@ -435,6 +450,7 @@ for c in "${CASES[@]}"; do
     F3) run_F3 ;;
     F4) run_F4 ;;
     F5) run_F5 ;;
+    F5ARCHIVE) run_F5Archive ;;
     F6) run_F6 ;;
     *) die "unknown case $c" ;;
   esac

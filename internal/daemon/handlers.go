@@ -35,6 +35,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/{name}", func(r chi.Router) {
 			r.Get("/", s.handleGetService)
 			r.Get("/deploys", s.handleGetServiceDeploys)
+			r.Get("/recovery", s.handleRecoveryStatus)
 			r.Post("/start", s.handleStartService)
 			r.Post("/stop", s.handleStopService)
 			r.Post("/restart", s.handleRestartService)

@@ -14,14 +14,16 @@ REPO_REMOTE_CAIRN="${CAIRN_REMOTE:-git@github.com:Yumekaz/Cairn.git}"
 REPO_REMOTE_DF="${DURAFLOW_REMOTE:-git@github.com:Yumekaz/DURAFLOW.git}"
 REPO_REMOTE_MD="${MINI_DOCKER_REMOTE:-git@github.com:Yumekaz/Mini-Docker.git}"
 # Prefer TMPDIR (or /tmp) so headless/stranger machines without ~/Desktop work
-COLD_DIR="${COLD_DIR:-${TMPDIR:-/tmp}/cairn-cold-clone-check}"
+COLD_DIR="${COLD_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/cairn-cold-clone.XXXXXX")}"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CAIRN_REV="${CAIRN_REV:-$(git -C "$SOURCE_DIR" rev-parse HEAD)}"
 SKIP_DEMO="${SKIP_DEMO:-0}"
 
 log() { echo "[cold-clone] $*"; }
 die() { echo "[cold-clone] ERROR: $*" >&2; exit 1; }
 
-log "Wiping and recreating $COLD_DIR"
-rm -rf "$COLD_DIR"
+[[ ! -e "$COLD_DIR" || ( -d "$COLD_DIR" && -z "$(ls -A "$COLD_DIR")" ) ]] || die "COLD_DIR must be new or empty; existing content is never deleted"
+log "Using fresh directory $COLD_DIR"
 mkdir -p "$COLD_DIR"
 cd "$COLD_DIR"
 
@@ -29,8 +31,18 @@ log "Cloning repos (sibling layout)"
 git clone --depth 1 "$REPO_REMOTE_CAIRN" Cairn
 git clone --depth 1 "$REPO_REMOTE_DF" DURAFLOW
 git clone --depth 1 "$REPO_REMOTE_MD" Mini-Docker
+git -C Cairn fetch --depth 1 origin "$CAIRN_REV"
+git -C Cairn checkout --detach "$CAIRN_REV"
+while read -r name revision; do
+  [[ -z "$name" || "$name" == \#* ]] && continue
+  case "$name" in DURAFLOW|Mini-Docker) ;; *) die "unknown locked repository $name";; esac
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die "invalid locked revision for $name"
+  git -C "$name" fetch --depth 1 origin "$revision"
+  git -C "$name" checkout --detach "$revision"
+done < Cairn/stack.lock
 
 cd "$COLD_DIR/Cairn"
+bash scripts/verify_stack.sh
 
 # Sanity: replace must be sibling, not a hardcoded home path
 if grep -E 'replace .*duraflow => /home/' go.mod; then
@@ -56,7 +68,6 @@ export MINI_DOCKER_SOCKET="${MINI_DOCKER_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(
 export PYTHONPATH="$COLD_DIR/Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
 export MINI_DOCKER_PYTHON="${MINI_DOCKER_PYTHON:-$(command -v python3)}"
 
-[[ -x "$CAIRN_ROOTFS/bin/busybox" || -x "$CAIRN_ROOTFS/bin/sh" ]] || die "rootfs incomplete at $CAIRN_ROOTFS"
 
 log "Unit tests"
 go test ./internal/deploymeta/ ./internal/daemon/ ./internal/config/ ./internal/preflight/ ./internal/store/ -count=1
@@ -65,6 +76,8 @@ if [[ "$SKIP_DEMO" == "1" ]]; then
   log "SKIP_DEMO=1 — build+tests only. OK."
   exit 0
 fi
+
+[[ -x "$CAIRN_ROOTFS/bin/busybox" || -x "$CAIRN_ROOTFS/bin/sh" ]] || die "rootfs incomplete at $CAIRN_ROOTFS"
 
 log "Running clean_demo.sh (uses existing Mini-Docker socket if present)"
 chmod +x scripts/clean_demo.sh
