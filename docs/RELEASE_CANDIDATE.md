@@ -44,9 +44,8 @@ an occupied port (`NOTES_PROOF_PORT` overrides it). Run on a trusted test host.
 
 ## Remaining release gates
 
-Do not declare a production release solely from the isolated tests. Record a
-successful full F5 HTTP interruption, fresh Linux installation, and host reboot
-recovery. A clean checkout on the development host is not a fresh VM. This host
+Do not declare a production release solely from these tests. Record a fresh
+Linux installation and host reboot recovery. A clean checkout on the development host is not a fresh VM. This host
 has no available QEMU/KVM setup; rebooting it would interrupt unrelated work.
 Use a disposable Linux VM for host boot testing. External users and sustained
 operation are additional evidence, not something a one-off smoke run establishes.
@@ -56,8 +55,29 @@ operation are additional evidence, not something a one-off smoke run establishes
 The recovery endpoint and isolated SIGKILL tests pass, as do the Cairn internal
 Go packages and shell/Python syntax checks. The isolated backup test observed
 pending metadata and archive bytes before SIGKILL, then verified startup repair
-marked the backup failed. The notes workload and updated F1/F2 scripts are
-implemented but their latest live run is not certified. The combined live
-validation launch was blocked twice by automatic execution-approval review
-timeouts. The existing live F5 HTTP experiment also failed to observe its
-barrier and remains an open integration issue; F5ARCHIVE is not its replacement.
+marked the backup failed. F5ARCHIVE remains separate from the live F5 test.
+
+On 2026-09-16, strengthened F1 exposed missing workflow input during recovery.
+Workflow input is now persisted with checked errors before DuraFlow scheduling.
+Metadata snapshots now use SQLite VACUUM INTO, including committed WAL contents,
+instead of copying the open main database file; snapshot files are private and
+synced. Tests cover snapshot WAL contents and persistence-before-scheduling.
+With these changes, F1 and F2 passed exactly-once-observed migration execution,
+persisted uncertainty, replay blocking and baseline retention. The live F5
+HTTP run then passed with SAW_PENDING=1 and observed archive bytes before SIGKILL.
+These results validate the tested failures, not general exactly-once execution
+or compatibility of arbitrary database migrations.
+
+The build-only cold-clone check subsequently passed on 2026-09-13 for Cairn
+`a8de35e0fd79ae1f1d6c7988f6fdefba6240f96a` and the two locked sibling revisions.
+It fetched all three repositories into `/tmp/cairn-cold-clone.1BsZix`, built and
+installed the CLI/daemon, and passed deploymeta, daemon, config, preflight and
+store tests with Go 1.26.4. This validates a clean checkout on the same host;
+it does not certify a fresh operating system, boot persistence or live operation.
+
+The notes HTTP workload subsequently passed write/restart/redeploy/backup/restore
+on 2026-09-13 in 37.21 seconds after correcting the smoke client's duration
+encoding to JSON nanoseconds. Service `notes-proof-62a235f5` was stopped after
+the proof; volume `notes-proof-62a235f5-data` and backup
+`9d3b6e39-9aac-42c7-963c-bc5fe6105791` were retained for inspection. The journal
+contained both notes after restart and redeploy, and only the first after restore.

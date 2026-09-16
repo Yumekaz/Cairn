@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import sys
 import time
 import uuid
 
@@ -76,7 +77,8 @@ def main():
            "command": ["/bin/busybox", "httpd", "-f", "-p", "80", "-h", "/www"],
            "ports": [{"host": PORT, "container": 80}],
            "volumes": [{"name": code_name, "mount_path": "/www"}, {"name": data_name, "mount_path": "/data"}],
-           "healthcheck": {"http_path": "/cgi-bin/notes", "interval": "2s", "timeout": "1s", "retries": 3, "startup_grace": "1s"}}
+           # The HTTP API encodes Go durations as nanoseconds (YAML accepts strings).
+           "healthcheck": {"http_path": "/cgi-bin/notes", "interval": 2000000000, "timeout": 1000000000, "retries": 3, "startup_grace": 1000000000}}
     started = time.monotonic()
     try:
         api("POST", "/services", cfg)
@@ -95,7 +97,13 @@ def main():
                           "backup": backup["id"], "seconds": round(time.monotonic()-started, 2),
                           "verified": ["write", "restart", "redeploy", "backup", "restore"]}))
     finally:
-        api("POST", f"/services/{name}/stop")
+        already_failed = sys.exc_info()[0] is not None
+        try:
+            api("POST", f"/services/{name}/stop")
+        except Exception as exc:
+            if not already_failed:
+                raise
+            print(f"Cleanup also failed for {name}: {exc}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

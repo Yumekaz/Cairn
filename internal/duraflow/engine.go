@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/yumekaz/cairn/internal/api"
 	"github.com/yumekaz/cairn/internal/runtime"
 	"github.com/yumekaz/cairn/internal/store"
 	dfengine "github.com/yumekaz/duraflow/pkg/engine"
@@ -35,12 +36,12 @@ type WorkflowTemplate struct {
 
 // CairnExecutor implements github.com/yumekaz/duraflow/internal/executor.Executor
 type CairnExecutor struct {
-	store      *store.Store
-	runtime    runtime.RuntimeBackend
-	templates  map[string]WorkflowTemplate
-	inputs     map[string]string            // maps duraflow runID to InputJSON
-	runStates  map[string]map[string]string // maps duraflow runID to step state map
-	mu         sync.RWMutex
+	store     *store.Store
+	runtime   runtime.RuntimeBackend
+	templates map[string]WorkflowTemplate
+	inputs    map[string]string            // maps duraflow runID to InputJSON
+	runStates map[string]map[string]string // maps duraflow runID to step state map
+	mu        sync.RWMutex
 }
 
 func NewCairnExecutor(s *store.Store, r runtime.RuntimeBackend) *CairnExecutor {
@@ -205,6 +206,14 @@ steps:
 	}
 
 	runID := uuid.New().String()
+	// Recovery input must be durable before the worker can observe this run.
+	// The event projection callback is not a reliable persistence boundary.
+	if e.store == nil {
+		return "", fmt.Errorf("workflow input store is not configured")
+	}
+	if err := e.store.CreateWorkflow(&api.Workflow{ID: runID, Type: wType, Status: "pending", InputJSON: string(inputBytes)}); err != nil {
+		return "", fmt.Errorf("persist workflow input before scheduling: %w", err)
+	}
 	e.RegisterRunInput(runID, string(inputBytes))
 
 	_, err = e.realEngine.RunWorkflowWithID(context.Background(), runID, def, orderedSteps, hash, yamlContent)

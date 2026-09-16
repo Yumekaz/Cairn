@@ -52,3 +52,21 @@ func NewStore(dbPath string) (*Store, error) {
 func (s *Store) Close() error {
 	return s.db.Close()
 }
+
+// BackupTo creates a transactionally consistent snapshot including WAL contents.
+// The destination must not already contain a database.
+func (s *Store) BackupTo(path string) error {
+	_, err := s.db.Exec("VACUUM INTO ?", path)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}

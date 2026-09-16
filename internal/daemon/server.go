@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -276,22 +275,11 @@ func (s *Server) BackupMetadata() error {
 		return err
 	}
 
-	timestamp := time.Now().Format("20060102_150405")
+	timestamp := time.Now().Format("20060102_150405.000000000")
 	backupPath := filepath.Join(backupDir, fmt.Sprintf("cairn_%s.db", timestamp))
 
-	src, err := os.Open(s.config.DatabasePath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	dst, err := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
+	// Snapshot through SQLite: copying the main file omits live WAL pages.
+	if err := s.store.BackupTo(backupPath); err != nil {
 		return err
 	}
 
