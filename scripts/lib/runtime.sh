@@ -379,7 +379,8 @@ ensure_cairnd() {
   rm -f "${HOME}/.cairn/cairnd.sock" "${HOME}/.cairn/cairnd.pid" 2>/dev/null || true
 
   local cd_log="${CAIRN_CAIRND_LOG:-/tmp/cairnd-demo.out}"
-  nohup cairnd >"$cd_log" 2>&1 &
+  # A matrix may share this path with its proof log; preserve earlier cases.
+  nohup cairnd >>"$cd_log" 2>&1 &
   local i
   for i in $(seq 1 50); do
     if command -v cairn >/dev/null 2>&1 && cairn status >/dev/null 2>&1; then

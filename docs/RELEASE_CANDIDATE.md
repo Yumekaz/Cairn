@@ -81,3 +81,22 @@ encoding to JSON nanoseconds. Service `notes-proof-62a235f5` was stopped after
 the proof; volume `notes-proof-62a235f5-data` and backup
 `9d3b6e39-9aac-42c7-963c-bc5fe6105791` were retained for inspection. The journal
 contained both notes after restart and redeploy, and only the first after restore.
+
+## Complete matrix observation (2026-09-16)
+
+On Cairn `ce88d200368a4bcbcf7bf211fb4c4b7f3e03be27` with the locked siblings,
+the full `prove_mlp.sh` invocation reported green core/stability checks, clean
+deploy/backup/restore, migration crash recovery, and rollback safety. Its live
+matrix reported GREEN for F1 through F6, including F5 with `SAW_PENDING=1`,
+and ended with `ALL REQUESTED CASES GREEN`. The recovery JSON command also
+returned marked deployments and operator actions against the live daemon.
+
+This summary records tool output observed during the session. The wrapper's
+final process exit was not collected before interruption; its temporary logs
+were cleared before continuation on 2026-09-17. Do not treat this as a retained
+raw-log certificate for the wrapper. The earlier focused migration/backup run
+is retained in [migration-and-backup.txt](validation/release-20260916/migration-and-backup.txt).
+
+For future runs, set `LOG_DIR` to a persistent evidence directory. Runtime startup
+now appends to its log instead of truncating prior matrix output on restart.
+Fresh-VM boot/reboot and sustained-operation validation remain outstanding.
