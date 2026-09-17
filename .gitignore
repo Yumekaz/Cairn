@@ -18,3 +18,10 @@ cairn.db
 
 # Specs / Documentation
 docs/specs/
+
+# Local assistant metadata and generated test caches
+.grok/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db-shm

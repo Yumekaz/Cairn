@@ -82,7 +82,7 @@ Full proofs need **local Linux + privileged Mini-Docker + DURAFLOW sibling**. Fa
 | Failed deploy left wrong `current_deploy_id` | [docs/postmortems/2026-07-failed-deploy-metadata.md](docs/postmortems/2026-07-failed-deploy-metadata.md) |
 | Mid-deploy `cairnd` kill + recovery | [docs/postmortems/2026-07-mid-deploy-crash-recovery.md](docs/postmortems/2026-07-mid-deploy-crash-recovery.md) |
 
-Closeout criteria: [docs/CLOSEOUT_A.md](docs/CLOSEOUT_A.md) · Portability A: [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md) · Architecture design (portfolio): [docs/design/CAIRN_SINGLE_NODE.md](docs/design/CAIRN_SINGLE_NODE.md) · Hiring research notes: [docs/design/PORTFOLIO_HIRING_RESEARCH.md](docs/design/PORTFOLIO_HIRING_RESEARCH.md) · [docs/roadmap.md](docs/roadmap.md).
+Closeout criteria: [docs/CLOSEOUT_A.md](docs/CLOSEOUT_A.md) · Portability A: [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md) · Architecture design: [docs/design/CAIRN_SINGLE_NODE.md](docs/design/CAIRN_SINGLE_NODE.md) · [docs/roadmap.md](docs/roadmap.md).
 
 ---
 
