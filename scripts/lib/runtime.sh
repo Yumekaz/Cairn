@@ -379,8 +379,13 @@ ensure_cairnd() {
   rm -f "${HOME}/.cairn/cairnd.sock" "${HOME}/.cairn/cairnd.pid" 2>/dev/null || true
 
   local cd_log="${CAIRN_CAIRND_LOG:-/tmp/cairnd-demo.out}"
-  # A matrix may share this path with its proof log; preserve earlier cases.
-  nohup cairnd >>"$cd_log" 2>&1 &
+  # Preserve earlier proof output. A new session prevents a caller's terminal
+  # from taking the daemon down with a hangup after this helper returns.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid -f cairnd </dev/null >>"$cd_log" 2>&1
+  else
+    nohup cairnd </dev/null >>"$cd_log" 2>&1 &
+  fi
   local i
   for i in $(seq 1 50); do
     if command -v cairn >/dev/null 2>&1 && cairn status >/dev/null 2>&1; then
