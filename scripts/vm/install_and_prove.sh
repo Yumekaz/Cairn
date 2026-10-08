@@ -30,7 +30,19 @@ else
   bash scripts/install.sh
 fi
 sudo /usr/bin/python3 -m venv /opt/cairn-stack/Mini-Docker/venv
-sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --no-deps /opt/cairn-stack/Mini-Docker
+if [[ "${CAIRN_VM_INSTALL_MODE:-source}" == verified-binaries ]]; then
+  python3 - <<'PY'
+import hashlib,json
+from pathlib import Path
+for name,digest in json.loads(Path('bin/wheel-hashes.json').read_text()).items():
+    assert Path(name).name==name and name.endswith('.whl')
+    assert hashlib.file_digest(Path('bin',name).open('rb'),'sha256').hexdigest()==digest
+print('Verified locally built runtime wheel checksum')
+PY
+  sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --no-index --no-deps /opt/cairn-stack/SERVER/bin/*.whl
+else
+  sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --timeout 120 --no-deps /opt/cairn-stack/Mini-Docker
+fi
 mkdir -p /opt/cairn-stack/Mini-Docker/rootfs/{bin,dev,proc,sys,tmp,etc}
 for command in sh echo cat dd httpd mkdir rmdir sync sleep printf; do
   ln -sf busybox "/opt/cairn-stack/Mini-Docker/rootfs/bin/$command"

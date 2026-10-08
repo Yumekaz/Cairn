@@ -79,6 +79,8 @@ def main():
     if args.install_mode=='verified-binaries':
         for binary in ('cairn','cairnd'):
             run(['go','build','-o',str(ROOT/'bin'/binary),'./cmd/'+binary],timeout=180)
+        wheel_dir=out/f'runtime-wheel-{int(time.time())}'
+        run([str(ROOT.parent/'Mini-Docker/venv/bin/python'),'-m','build','--wheel','--no-isolation','--outdir',str(wheel_dir),str(ROOT.parent/'Mini-Docker')],timeout=180)
     with tarfile.open(out / "source.tar", "w") as archive:
         for repo in ("SERVER", "DURAFLOW", "Mini-Docker"):
             directory = ROOT.parent / repo
@@ -104,6 +106,13 @@ def main():
             manifest=out/'binary-hashes.json'
             manifest.write_text(json.dumps(hashes,indent=2))
             archive.add(manifest,arcname='SERVER/bin/binary-hashes.json',recursive=False)
+            wheels=list(wheel_dir.glob('*.whl'))
+            if len(wheels)!=1:raise RuntimeError('expected one locally built runtime wheel')
+            wheel=wheels[0]
+            wheel_manifest=out/'wheel-hashes.json'
+            wheel_manifest.write_text(json.dumps({wheel.name:hashlib.file_digest(wheel.open('rb'),'sha256').hexdigest()},indent=2))
+            archive.add(wheel,arcname='SERVER/bin/'+wheel.name,recursive=False)
+            archive.add(wheel_manifest,arcname='SERVER/bin/wheel-hashes.json',recursive=False)
             status['installation_mode']='verified-binaries; source build separately tested in GitHub CI'
     (out / "revisions.json").write_text(json.dumps(revisions, indent=2))
     goroot = Path(run(["go", "env", "GOROOT"]).strip())
