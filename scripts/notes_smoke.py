@@ -60,12 +60,14 @@ def expect(value):
         time.sleep(.25)
     raise AssertionError(f"expected {value!r}, got {last!r}")
 
-def main():
+def main(on_fixture=None):
     # Fail before creating resources when this host port is already occupied.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", PORT))
     name = "notes-proof-" + uuid.uuid4().hex[:8]
     code_name, data_name = name + "-code", name + "-data"
+    if on_fixture:
+        on_fixture({"service":name,"data_volume":data_name,"code_volume":code_name,"stage":"declared","port":PORT})
     code = api("POST", "/volumes", {"name": code_name, "mount_path": "/www"})
     api("POST", "/volumes", {"name": data_name, "mount_path": "/data"})
     target = Path(code["host_path"]) / "cgi-bin"
@@ -86,6 +88,8 @@ def main():
         journal("POST", "first")
         expect("first\n")
         backup = api("POST", f"/volumes/{data_name}/backups")
+        if on_fixture:
+            on_fixture({"service":name,"data_volume":data_name,"code_volume":code_name,"backup":backup["id"],"stage":"snapshot-created","port":PORT})
         journal("POST", "second")
         api("POST", f"/services/{name}/restart")
         expect("first\nsecond\n")

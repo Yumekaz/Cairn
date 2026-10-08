@@ -1,0 +1,7 @@
+socket_path: /home/ubuntu/.cairn/cairnd.sock
+database_path: /home/ubuntu/.cairn/cairn.db
+data_dir: /home/ubuntu/.cairn
+volume_dir: /home/ubuntu/.cairn/volumes
+backup_dir: /home/ubuntu/.cairn/backups
+mini_docker_socket: /run/cairn-proof/mini-docker.sock
+dashboard_addr: 127.0.0.1:2476

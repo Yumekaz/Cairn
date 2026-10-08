@@ -55,12 +55,12 @@ func TestMongoCommandsOmitIncompleteAuthentication(t *testing.T) {
 
 func TestDatabaseBackupCommandsUseLiteralArguments(t *testing.T) {
 	if got := postgresDumpCommand("10.0.0.1;touch /tmp/pwned", "user name", "db"); !reflect.DeepEqual(got, []string{
-		"pg_dump", "-h", "10.0.0.1;touch /tmp/pwned", "-U", "user name", "-d", "db", "-f", "/backup_vol/backup_dump.sql",
+		"pg_dump", "--clean", "--if-exists", "-h", "10.0.0.1;touch /tmp/pwned", "-U", "user name", "-d", "db", "-f", "/backup_vol/backup_dump.sql",
 	}) {
 		t.Fatalf("unexpected postgres dump argv: %#v", got)
 	}
 	if got := postgresRestoreCommand("10.0.0.1$(id)", "user", "db;drop"); !reflect.DeepEqual(got, []string{
-		"psql", "-h", "10.0.0.1$(id)", "-U", "user", "-d", "db;drop", "-f", "/backup_vol/restore_dump.sql",
+		"psql", "--set", "ON_ERROR_STOP=on", "--single-transaction", "-h", "10.0.0.1$(id)", "-U", "user", "-d", "db;drop", "-f", "/backup_vol/restore_dump.sql",
 	}) {
 		t.Fatalf("unexpected postgres restore argv: %#v", got)
 	}

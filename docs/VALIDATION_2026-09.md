@@ -1,66 +1,72 @@
 # Validation record — September 2026
 
-## Cairn dashboard flow
+This is an evidence record, not a claim that the six-project suite is fault-free.
+The latest repeatable run is retained under `validation-runs/<UTC stamp>/` by
+[`scripts/acceptance_suite.sh`](../scripts/acceptance_suite.sh). It records full
+repository revisions, dirty-tree state, per-check exit codes and bounded logs.
+Checks that need a VM, root, external database, long observation period, or
+independent security review are reported as blocked rather than passed.
 
-Tested against a live local Cairn daemon using the persisted
-`notes-proof-62a235f5` test service and its dedicated data volume.
+## Cairn dashboard — live browser check, 2026-09-25
 
-| Flow | Result |
+Test target: the live local daemon, disposable service `notes-proof-62a235f5`,
+and attached test volume `notes-proof-62a235f5-data`.
+
+| Flow/control | Observed result |
 | --- | --- |
-| Overview, Services, Volumes & Backups, Events navigation | Passed |
-| Service listing and inspect modal | Passed |
-| Service details, deploy history, lifecycle state, live logs | Passed |
-| Start and restart actions | Passed; state and logs refreshed |
-| Volume inspection and backup creation | Passed |
-| Restore confirmation, disabled Proceed, and cancellation | Passed |
-| Events timeline and recent audit records | Passed |
-| Daemon offline banner and disabled destructive controls | Passed |
-| Daemon restart and Retry now reconnect | Passed |
+| Overview, Services, Volumes & Backups, Events navigation | Passed; live daemon status and data rendered |
+| Service search | Passed; exact test-service match showed `1 of 4`, unknown name showed `0 of 4` and “No matches” |
+| Service inspection | Passed; ID, kind, Mini-Docker runtime, route, lifecycle state, deployment history and console output rendered |
+| Service Stop / Start / Restart | Passed on the disposable service; Stop appeared in audit history and reduced Active from 2 to 1; Start restored Active to 2; Restart produced a `ServiceRestarted` event and the service remained RUNNING |
+| Console Refresh / Clear / Wrap / Follow | Passed for refresh and visible output, local-view-only clear message, wrap class toggle, and follow checkbox toggle |
+| Service modal keyboard behavior | Passed; Tab stayed in the dialog, Escape closed it, and focus returned to the originating Inspect button |
+| Volume Inspect / Backup Now | Passed; selected the test volume and created successful backup prefix `b8defe70-08f` |
+| Backup restore guard | Passed; Proceed began disabled, acknowledgement enabled it, unchecking disabled it, and Cancel/Escape closed the dialog |
+| Safe rollback path | Passed on the disposable service; selecting older successful deploy `bf52a3c7` created active deploy `63658fc4`; selecting the original `238d1c4f` created active deploy `39b31f97`. The service remained running. Both source releases were version 1. |
+| Event type filter / Refresh | Passed; ServiceStopped and ServiceRestarted filters rendered only their selected event types; Refresh retained the selected filter and audit records |
+| Event Auto-scroll | Passed; with auto-scroll off, refreshing from the top kept the view at the top; with it on, refresh moved to the latest event |
+| Daemon offline / reconnect | Passed in the earlier local run: offline banner and disabled mutations appeared, then Retry now restored Connected and refreshed state |
 
-The restore Proceed action was not clicked through the browser because it
-replaces volume contents; the same restore API is covered by the notes smoke
-workflow and Cairn backup/restore tests. It requires deliberate operator action.
-The service-search field, log Wrap/Clear/Follow controls, event type filter,
-rollback confirmation, and Restore Proceed were not all exercised in the
-retained browser trace. The dashboard was unreachable when browser validation
-was resumed on September 21; these controls remain an open acceptance gate.
+The Restore Proceed action was not exercised in that September browser session.
+It has since been verified on an explicitly disposable notes fixture, including
+the application-data result; see [the October record](VALIDATION_2026-10.md).
 
-The runtime helper now launches `cairnd` in a new session where `setsid` is
-available. This was verified by starting the helper, allowing its command to
-return, then checking the daemon from a separate command.
+Not covered by this browser session: the unsafe-migration rollback confirmation
+path, metadata expansion on individual events, every modal close affordance, or
+offline behavior under an actual network partition. The safe rollback path does
+not establish that every database migration is reversible.
 
-## Cross-project results
+## Automated project suites
 
-| Project | Validation |
+| Project | Current evidence |
 | --- | --- |
-| Cairn | internal Go tests, live deployment/recovery matrix, backup/restore, migration replay guard, dashboard flows |
-| DuraFlow | `go test ./...` passed |
-| Mini-Docker | 88 normal tests plus 5 guarded root runtime tests passed after preventing character-device copies from filling `/tmp` |
-| FailForge | `go test ./...` passed after fault-error handling; CPU pause and slow disk repeated 25 times |
-| MiniDB | 7 cluster tests plus 23 other tests passed after correcting RF=1 single-node expectations and checking follower reads |
-| Coordination-service | 311 tests passed, including leadership transfer/removal |
+| Cairn | Full `go test ./...` is included in the retained acceptance run; the live migration/recovery and dashboard work is recorded separately. |
+| DuraFlow | `go test ./...`; its PostgreSQL integration test requires `DURAFLOW_TEST_POSTGRES_DSN` and is not counted as proven when that variable is absent. |
+| Mini-Docker | `python3 -m pytest -q`; non-root runs report six root-only skips. A separate privileged run is required to close that gate. |
+| FailForge | `go test ./...`; CPU pause and slow-disk fault recovery also had repeated runs in the earlier local proof. |
+| MiniDB | `python3 -m pytest -q tests`, including small-cluster replication, persistence and fault-oriented tests. |
+| Coordination-service | `python3 -m pytest -q`, including leader transfer/removal, concurrency and recovery tests. |
 
-## Limits
+See the timestamped acceptance report for the exact current revisions, result
+codes, and logs; do not use a historical pass to override a current failure or
+blocked result.
 
-This record covers reproducible software failures on this host. It does not
-claim validation of a physical power loss, an actual host reboot, long-term
-production load, arbitrary hostile containers, or every possible Linux kernel
-and filesystem combination. Those require disposable hosts and longer-running
-operational observation.
+## Historical open gates
 
-## Remaining acceptance gates
+This list describes the September snapshot. The October record supersedes it;
+do not read already-closed database or runtime gaps below as current failures.
 
-1. Start `cairnd` on a dedicated, disposable Linux host and verify service
-   delivery after an actual host reboot. The current Desktop host was not
-   rebooted as part of this run.
-2. Run a bounded multi-day soak with recorded request success, restart count,
-   backup restore verification and resource usage. The current smoke runs were
-   measured in minutes, not days.
-3. Test disk-full and host-level power interruption in a disposable filesystem
-   or VM. The in-process SIGKILL tests do not simulate a power cut.
-4. Complete a hostile-workload isolation review and independent security test
-   before accepting untrusted tenants.
-5. Finish browser checks for search, log controls, event type filters and
-   confirmed restore/rollback against disposable data. The restore confirmation
-   UI disabled Proceed until acknowledgement and Cancel worked, but the
-   destructive final action was not performed through the browser.
+1. Seed known records into real PostgreSQL, Redis, and MongoDB services; verify
+   Cairn backups/restores against those records and run DuraFlow PostgreSQL
+   integration tests with a dedicated disposable DSN.
+2. Run Mini-Docker's root-only namespace/runtime integration suite from a
+   privileged disposable environment.
+3. Verify fresh installation, daemon startup after reboot, and abrupt VM
+   shutdown/recovery in a disposable Linux VM. The host itself was not rebooted.
+4. Run bounded disk-full tests on a dedicated small filesystem and power-loss
+   tests in a VM. Host `/tmp` must not be filled for these checks.
+5. Complete a monitored 24-hour soak (extend to 72 hours if clean), retaining
+   request/error totals, latency, resource use, restart count and a restore
+   verification.
+6. Complete a threat-model review and adversarial workload test before using
+   untrusted tenants. This record is not an independent security assessment.

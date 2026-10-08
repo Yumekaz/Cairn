@@ -6,6 +6,72 @@ on:
   pull_request:
 
 jobs:
+  stateful-spine-and-databases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Cairn
+      - name: Read locked deployment-stack revisions
+        id: spine
+        working-directory: Cairn
+        run: |
+          for project in DURAFLOW Mini-Docker; do
+            revision=$(awk -v project="$project" '$1==project {print $2}' stack.lock)
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            key=${project//-/_}
+            echo "$key=$revision" >> "$GITHUB_OUTPUT"
+          done
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/DURAFLOW
+          ref: ${{ steps.spine.outputs.DURAFLOW }}
+          path: DURAFLOW
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Mini-Docker
+          ref: ${{ steps.spine.outputs.Mini_Docker }}
+          path: Mini-Docker
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: Cairn/go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare real namespace runtime prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y busybox-static iproute2 iptables
+          mkdir -p Mini-Docker/rootfs/{bin,dev,proc,sys,tmp,etc}
+          cp /usr/bin/busybox Mini-Docker/rootfs/bin/busybox
+          for applet in sh echo cat sleep dd mkdir rmdir sync httpd printf; do ln -sf busybox "Mini-Docker/rootfs/bin/$applet"; done
+      - name: Build exact Cairn implementation
+        working-directory: Cairn
+        run: |
+          mkdir -p bin
+          go build -o bin/cairn ./cmd/cairn
+          go build -o bin/cairnd ./cmd/cairnd
+      - name: Real stateful deployment and recovery spine
+        working-directory: Cairn
+        run: bash scripts/ci_spine_proof.sh
+      - name: Real PostgreSQL Redis and MongoDB recovery drivers
+        working-directory: Cairn
+        run: |
+          docker pull postgres:18
+          docker pull redis:7-bookworm
+          docker pull mongo:7
+          CAIRN_TEST_POSTGRES_IMAGE=postgres:18 bash scripts/verify_database_drivers.sh verification/databases
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cairn-stateful-spine-and-databases
+          path: |
+            Cairn/verification/*.log
+            Cairn/verification/*.json
+            Cairn/verification/databases/*.log
+            Cairn/verification/databases/*.txt
+            Cairn/verification/databases/images.json
   unit-and-build:
     runs-on: ubuntu-latest
     defaults:
@@ -40,7 +106,7 @@ jobs:
 
       - name: Unit tests (core packages)
         run: |
-          go test ./internal/deploymeta/ ./internal/config/ ./internal/preflight/ ./internal/store/ ./internal/daemon/ -count=1
+          go test ./cmd/... ./internal/... -count=1
 
       - name: Build binaries
         run: |
@@ -49,7 +115,7 @@ jobs:
 
       - name: Demo script dry syntax check
         run: |
-          for s in scripts/*.sh; do bash -n "$s"; done
+          for s in scripts/*.sh scripts/vm/*.sh; do bash -n "$s"; done
 
       - name: Note on full reliability gate
         run: |

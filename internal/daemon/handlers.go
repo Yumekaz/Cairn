@@ -192,9 +192,15 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cfg.Name == "" {
-		s.error(w, http.StatusBadRequest, "service name is required")
+	if !api.ValidResourceName(cfg.Name) {
+		s.error(w, http.StatusBadRequest, "service name must be a single 1-128 character resource name starting with a letter or number")
 		return
+	}
+	for _, volume := range cfg.Volumes {
+		if !api.ValidResourceName(volume.Name) {
+			s.error(w, http.StatusBadRequest, "invalid volume resource name")
+			return
+		}
 	}
 
 	// 1. Get or create service record
@@ -663,6 +669,10 @@ func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service,
 	dbIP := dbInfo.IPAddress
 
 	password := dbServiceConfig.Environment["REDIS_PASSWORD"]
+	environment := make(map[string]string)
+	if password != "" {
+		environment["REDISCLI_AUTH"] = password
+	}
 	dumpFileHostPath := filepath.Join(vol.HostPath, "backup_dump.rdb")
 	os.Remove(dumpFileHostPath)
 
@@ -675,9 +685,7 @@ func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service,
 		Kind:    dbServiceConfig.Kind,
 		Image:   dbServiceConfig.Image,
 		Command: redisDumpCommand(dbIP),
-		Environment: map[string]string{
-			"REDISCLI_AUTH": password,
-		},
+		Environment: environment,
 		Volumes: []api.VolumeConfig{
 			{
 				Name:      vol.Name,
@@ -799,6 +807,7 @@ func mongoDumpCommand(dbIP, user, password string) []string {
 func postgresDumpCommand(dbIP, user, dbname string) []string {
 	return []string{
 		"pg_dump",
+		"--clean", "--if-exists",
 		"-h", dbIP,
 		"-U", user,
 		"-d", dbname,
@@ -809,6 +818,7 @@ func postgresDumpCommand(dbIP, user, dbname string) []string {
 func postgresRestoreCommand(dbIP, user, dbname string) []string {
 	return []string{
 		"psql",
+		"--set", "ON_ERROR_STOP=on", "--single-transaction",
 		"-h", dbIP,
 		"-U", user,
 		"-d", dbname,
@@ -1219,8 +1229,8 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" {
-		s.error(w, http.StatusBadRequest, "volume name is required")
+	if !api.ValidResourceName(req.Name) {
+		s.error(w, http.StatusBadRequest, "volume name must be a single 1-128 character resource name starting with a letter or number")
 		return
 	}
 

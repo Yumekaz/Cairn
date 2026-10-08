@@ -6,7 +6,13 @@
 
 Cairn is a CLI-first, **single-node** Linux PaaS: deploy stateful services on **Mini-Docker**, durable deploys via **DuraFlow**, volumes/backups, reverse proxy, and a recoverability story when `cairnd` dies mid-deploy.
 
-Not multi-node. Not a cloud clone. Spine = **Cairn + Mini-Docker + DuraFlow**. Lab projects (FailForge / MiniDB / Coordination) are portfolio-adjacent — see **[docs/STACK.md](docs/STACK.md)**.
+Deployment scope is one Linux host. **Cairn + Mini-Docker + DuraFlow** form the deployment stack; FailForge, MiniDB and Coordination provide connected verification/reference work, rather than required production dependencies. See [docs/STACK.md](docs/STACK.md).
+
+## Acceptance evidence
+
+The [October 2026 validation record](docs/VALIDATION_2026-10.md) tracks actual passes, failures and pending gates. Run `bash scripts/acceptance_suite.sh` for bounded, retained six-repository results; add `ACCEPTANCE_DATABASES=1` for real private PostgreSQL, Redis and MongoDB driver checks plus DuraFlow PostgreSQL leases. Each run saves commit IDs, dirty-tree patches, untracked source archives and individual logs. Root runtime proofs, live browser controls, VM recovery and elapsed-time soak evidence are separate gates, not inferred from unit tests.
+
+The dashboard is a local admin interface: its TCP listener rejects cross-origin browser requests and unexpected Host headers. This is not authentication or an audited hostile-tenant isolation guarantee. Keep it local; a public deployment needs a separately secured access layer. PostgreSQL logical restores replace objects included in the snapshot and stop on errors transactionally; unrelated objects created later are not automatically removed. MongoDB logical restores are not globally atomic across collections.
 
 ---
 

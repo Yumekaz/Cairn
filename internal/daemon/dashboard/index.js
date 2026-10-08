@@ -14,12 +14,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---------------------------------------------------------------------------
   let servicesCache = [];
   let eventsCache = [];
+  const expandedEventMetadata = new Set();
+  let lastRenderedEventPayload = null;
+  const dateFormatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+  const clockFormatter = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   let selectedVolumeName = null;
   let currentRoute = '';
   let activeServiceName = null;
   let activeLogsInterval = null;
   let lastLogsText = '';
   let currentConfirmCallback = null;
+  const busyBackupVolumes = new Set();
 
   // Connection / refresh
   let isOnline = false;
@@ -72,7 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Enable / disable mutation actions
     document.querySelectorAll('.needs-online').forEach((el) => {
       if (online) {
-        if (el.dataset.busy !== '1') el.disabled = false;
+        el.disabled = el.dataset.busy === '1' || el.dataset.stateDisabled === '1';
       } else {
         el.disabled = true;
       }
@@ -89,8 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (wasOnline !== online && online && opts.reconnected) {
       showToast('Reconnected to cairnd', 'success');
       if (activeServiceName) {
-        const svc = servicesCache.find((x) => x.name === activeServiceName);
-        setupServiceActions(activeServiceName, svc && svc.actual_state);
+        showServiceDetail(activeServiceName);
       }
     }
   }
@@ -355,6 +359,10 @@ document.addEventListener('DOMContentLoaded', () => {
       volumes = volumes || [];
       servicesCache = services;
       eventsCache = events;
+      const availableEventIDs = new Set(events.map((event) => event.id));
+      expandedEventMetadata.forEach((id) => {
+        if (!availableEventIDs.has(id)) expandedEventMetadata.delete(id);
+      });
 
       document.getElementById('overview-services-count').textContent = String(services.length);
       document.getElementById('overview-volumes-count').textContent = String(volumes.length);
@@ -514,7 +522,9 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="service-card-footer">
             <button type="button" class="btn btn-secondary btn-sm btn-inspect">Inspect</button>
           </div>`;
-        card.querySelector('.btn-inspect').addEventListener('click', () => showServiceDetail(s.name));
+        const inspect = card.querySelector('.btn-inspect');
+        inspect.dataset.serviceName = s.name;
+        inspect.addEventListener('click', () => showServiceDetail(s.name));
         container.appendChild(card);
       });
 
@@ -571,6 +581,7 @@ document.addEventListener('DOMContentLoaded', () => {
     modalFocusStack.push({
       modal,
       returnTo: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      returnToServiceName: document.activeElement instanceof HTMLElement ? document.activeElement.dataset.serviceName : null,
     });
     modal.classList.remove('hidden');
     requestAnimationFrame(() => {
@@ -586,14 +597,19 @@ document.addEventListener('DOMContentLoaded', () => {
   function deactivateModalTrap(modal) {
     modal.classList.add('hidden');
     let returnTo = null;
+    let returnToServiceName = null;
     for (let i = modalFocusStack.length - 1; i >= 0; i--) {
       if (modalFocusStack[i].modal === modal) {
         returnTo = modalFocusStack[i].returnTo;
+        returnToServiceName = modalFocusStack[i].returnToServiceName;
         modalFocusStack.splice(i, 1);
         break;
       }
     }
-    if (returnTo && typeof returnTo.focus === 'function' && document.contains(returnTo)) {
+    if (returnToServiceName && (!returnTo || !document.contains(returnTo))) {
+      returnTo = Array.from(document.querySelectorAll('.btn-inspect')).find((el) => el.dataset.serviceName === returnToServiceName);
+    }
+    if (returnTo && typeof returnTo.focus === 'function' && isFocusableVisible(returnTo)) {
       returnTo.focus();
     }
   }
@@ -603,8 +619,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---------------------------------------------------------------------------
   async function showServiceDetail(serviceName) {
     const modal = document.getElementById('modal-service-detail');
-    activateModalTrap(modal);
+    if (modal.classList.contains('hidden')) activateModalTrap(modal);
     activeServiceName = serviceName;
+    ['btn-action-start', 'btn-action-stop', 'btn-action-restart', 'btn-logs-refresh'].forEach((id) => {
+      const button = document.getElementById(id);
+      button.dataset.busy = '1';
+      button.disabled = true;
+    });
     lastLogsText = '';
 
     if (activeLogsInterval) {
@@ -691,6 +712,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // State-aware enablement when online
     const state = (actualState || '').toLowerCase();
     const online = isOnline;
+    [newStart, newStop, newRestart, newRefresh].forEach((button) => { button.dataset.busy = '0'; });
+    newStart.dataset.stateDisabled = state === 'running' || state === 'starting' ? '1' : '0';
+    newStop.dataset.stateDisabled = state === 'stopped' || state === 'failed' ? '1' : '0';
+    newRestart.dataset.stateDisabled = '0';
+    newRefresh.dataset.stateDisabled = '0';
     newStart.disabled = !online || state === 'running' || state === 'starting';
     newStop.disabled = !online || state === 'stopped' || state === 'failed';
     newRestart.disabled = !online;
@@ -724,7 +750,7 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast(e.message, 'error');
     } finally {
       btn.dataset.busy = '0';
-      if (isOnline) btn.disabled = false;
+      btn.disabled = !isOnline || btn.dataset.stateDisabled === '1';
     }
   }
 
@@ -1049,18 +1075,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const newBtn = btnCreate.cloneNode(true);
     btnCreate.parentNode.replaceChild(newBtn, btnCreate);
-    newBtn.disabled = !isOnline;
+    newBtn.dataset.busy = busyBackupVolumes.has(volumeName) ? '1' : '0';
+    newBtn.disabled = !isOnline || busyBackupVolumes.has(volumeName);
     newBtn.addEventListener('click', () => triggerCreateBackup(volumeName));
 
     loadBackupsList(volumeName);
   }
 
   async function loadBackupsList(volumeName) {
+    if (selectedVolumeName !== volumeName) return;
     const listBody = document.getElementById('backups-list-body');
     listBody.innerHTML = skeletonStackHtml(2);
 
     try {
       let backups = await apiCall(`/volumes/${encodeURIComponent(volumeName)}/backups`);
+      if (selectedVolumeName !== volumeName) return;
       backups = backups || [];
       listBody.innerHTML = '';
 
@@ -1081,6 +1110,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const idShort = escapeHtml((b.id || '').slice(0, 12));
         const status = escapeHtml(b.status || 'unknown');
         const checksum = b.checksum ? escapeHtml(String(b.checksum).slice(0, 16)) : '—';
+        const restorable = String(b.status || '').toLowerCase() === 'success';
         item.innerHTML = `
           <div class="backup-meta-info">
             <span class="backup-id text-mono">${idShort}…</span>
@@ -1089,7 +1119,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="backup-subtext text-mono" style="font-size:10px;">SHA256: ${checksum}</span>
           </div>
           <div>
-            <button type="button" class="btn btn-secondary btn-sm btn-restore needs-online" ${isOnline ? '' : 'disabled'} style="padding:4px 8px;font-size:11px;">Restore</button>
+            <button type="button" class="btn btn-secondary btn-sm btn-restore needs-online" data-state-disabled="${restorable ? '0' : '1'}" ${isOnline && restorable ? '' : 'disabled'} title="${restorable ? 'Restore this snapshot' : 'Only successful snapshots can be restored'}" style="padding:4px 8px;font-size:11px;">Restore</button>
           </div>`;
         item.querySelector('.btn-restore').addEventListener('click', () =>
           triggerRestoreBackup(volumeName, b.id)
@@ -1097,16 +1127,19 @@ document.addEventListener('DOMContentLoaded', () => {
         listBody.appendChild(item);
       });
     } catch (err) {
+      if (selectedVolumeName !== volumeName) return;
       listBody.innerHTML = `<p class="text-danger text-center py-4">Error loading backups: ${escapeHtml(err.message)}</p>`;
     }
   }
 
   async function triggerCreateBackup(volumeName) {
+    if (busyBackupVolumes.has(volumeName)) return;
     if (!isOnline) {
       showToast('Daemon offline', 'error');
       return;
     }
     const btnCreate = document.getElementById('btn-create-backup');
+    busyBackupVolumes.add(volumeName);
     btnCreate.dataset.busy = '1';
     btnCreate.disabled = true;
     try {
@@ -1118,8 +1151,12 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (err) {
       showToast('Backup failed: ' + err.message, 'error');
     } finally {
-      btnCreate.dataset.busy = '0';
-      btnCreate.disabled = !isOnline;
+      busyBackupVolumes.delete(volumeName);
+      if (selectedVolumeName === volumeName) {
+        const currentButton = document.getElementById('btn-create-backup');
+        currentButton.dataset.busy = '0';
+        currentButton.disabled = !isOnline;
+      }
     }
   }
 
@@ -1159,6 +1196,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 64;
 
     if (!silent) {
+      lastRenderedEventPayload = null;
       body.innerHTML = skeletonStackHtml(4);
     }
 
@@ -1195,6 +1233,14 @@ document.addEventListener('DOMContentLoaded', () => {
           ? `${events.length} event${events.length === 1 ? '' : 's'}`
           : `${filtered.length} of ${events.length} events`;
 
+      const eventPayload = JSON.stringify(filtered);
+      if (eventPayload === lastRenderedEventPayload) {
+        setPanelError('events-error', null);
+        updateLastUpdated();
+        return;
+      }
+      lastRenderedEventPayload = eventPayload;
+
       body.innerHTML = '';
 
       if (filtered.length === 0) {
@@ -1212,6 +1258,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
+      const eventFragment = document.createDocumentFragment();
       filtered.forEach((e) => {
         const node = document.createElement('div');
         node.className = `timeline-node ${eventTypeClass(e.type)}`;
@@ -1224,8 +1271,8 @@ document.addEventListener('DOMContentLoaded', () => {
             /* keep raw */
           }
           metaBlock = `
-            <button type="button" class="btn-link text-sm mt-2 toggle-metadata">Inspect metadata »</button>
-            <pre class="timeline-json hidden">${escapeHtml(pretty)}</pre>`;
+            <button type="button" class="btn-link text-sm mt-2 toggle-metadata">${expandedEventMetadata.has(e.id) ? 'Hide metadata «' : 'Inspect metadata »'}</button>
+            <pre class="timeline-json${expandedEventMetadata.has(e.id) ? '' : ' hidden'}">${escapeHtml(pretty)}</pre>`;
         }
         node.innerHTML = `
           <div class="timeline-meta">${escapeHtml(formatDateTime(e.created_at))}</div>
@@ -1238,13 +1285,16 @@ document.addEventListener('DOMContentLoaded', () => {
           toggle.addEventListener('click', () => {
             const pre = node.querySelector('.timeline-json');
             pre.classList.toggle('hidden');
+            if (pre.classList.contains('hidden')) expandedEventMetadata.delete(e.id);
+            else expandedEventMetadata.add(e.id);
             toggle.textContent = pre.classList.contains('hidden')
               ? 'Inspect metadata »'
               : 'Hide metadata «';
           });
         }
-        body.appendChild(node);
+        eventFragment.appendChild(node);
       });
+      body.appendChild(eventFragment);
 
       if (autoScroll && (nearBottom || !silent)) {
         body.scrollTop = body.scrollHeight;
@@ -1292,12 +1342,14 @@ document.addEventListener('DOMContentLoaded', () => {
     else forceInputWrapper.classList.add('hidden');
 
     const btnProceed = document.getElementById('btn-confirm-proceed');
+    btnProceed.dataset.stateDisabled = '1';
     btnProceed.disabled = true;
 
     function validateInput() {
       const isChecked = chk.checked;
       const textMatch = !forceTextRequired || forceInput.value.trim().toUpperCase() === 'FORCE';
-      btnProceed.disabled = !(isChecked && textMatch);
+      btnProceed.dataset.stateDisabled = isChecked && textMatch ? '0' : '1';
+      btnProceed.disabled = !isOnline || btnProceed.dataset.stateDisabled === '1';
     }
 
     chk.onchange = validateInput;
@@ -1316,6 +1368,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-confirm-cancel').onclick = closeConfirmModal;
   document.getElementById('btn-close-confirm-modal').onclick = closeConfirmModal;
   document.getElementById('btn-confirm-proceed').onclick = () => {
+    if (!isOnline || document.getElementById('btn-confirm-proceed').disabled) return;
     const cb = currentConfirmCallback;
     closeConfirmModal();
     if (cb) cb();
@@ -1351,13 +1404,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!isoString) return '—';
     const d = new Date(isoString);
     if (Number.isNaN(d.getTime())) return String(isoString);
-    const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const date = dateFormatter.format(d);
+    const time = clockFormatter.format(d);
     return `${date} ${time}`;
   }
 
   function formatClock(d) {
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return clockFormatter.format(d);
   }
 
   function escapeHtml(unsafe) {
