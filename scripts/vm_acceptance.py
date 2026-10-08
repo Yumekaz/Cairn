@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--boot-timeout", type=int, default=1200)
     parser.add_argument("--install-timeout", type=int, default=3600)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--install-mode", choices=['source','verified-binaries'], default='source')
     args = parser.parse_args()
     image = args.image.resolve()
     manifest = image.parent / "SHA256SUMS"
@@ -75,6 +76,9 @@ def main():
         (out/'source.tar').rename(out/f'source-before-resume-{stamp}.tar')
         (out/'revisions.json').rename(out/f'revisions-before-resume-{stamp}.json')
     revisions = {}
+    if args.install_mode=='verified-binaries':
+        for binary in ('cairn','cairnd'):
+            run(['go','build','-o',str(ROOT/'bin'/binary),'./cmd/'+binary],timeout=180)
     with tarfile.open(out / "source.tar", "w") as archive:
         for repo in ("SERVER", "DURAFLOW", "Mini-Docker"):
             directory = ROOT.parent / repo
@@ -91,6 +95,16 @@ def main():
         if not busybox.is_file() or busybox.stat().st_size == 0:
             raise RuntimeError("static BusyBox fixture is missing")
         archive.add(busybox.resolve(), arcname="Mini-Docker/rootfs/bin/busybox", recursive=False)
+        if args.install_mode=='verified-binaries':
+            hashes={}
+            for binary in ('cairn','cairnd'):
+                path=ROOT/'bin'/binary
+                hashes[binary]=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
+                archive.add(path,arcname='SERVER/bin/'+binary,recursive=False)
+            manifest=out/'binary-hashes.json'
+            manifest.write_text(json.dumps(hashes,indent=2))
+            archive.add(manifest,arcname='SERVER/bin/binary-hashes.json',recursive=False)
+            status['installation_mode']='verified-binaries; source build separately tested in GitHub CI'
     (out / "revisions.json").write_text(json.dumps(revisions, indent=2))
     goroot = Path(run(["go", "env", "GOROOT"]).strip())
     if not (args.resume and (out/'go-toolchain.tgz').exists()):
@@ -130,7 +144,9 @@ def main():
         for filename in ("source.tar", "go-toolchain.tgz"):
             run(["scp", *key_options, "-P", str(args.ssh_port), str(out / filename), "ubuntu@127.0.0.1:/home/ubuntu/"], timeout=300)
         save("fresh-install-and-notes-proof")
-        output = ssh("tar -xOf /home/ubuntu/source.tar SERVER/scripts/vm/install_and_prove.sh | bash", timeout=args.install_timeout, log_path=out/'install.log')
+        command="tar -xOf /home/ubuntu/source.tar SERVER/scripts/vm/install_and_prove.sh | "
+        if args.install_mode=='verified-binaries': command+="env CAIRN_VM_INSTALL_MODE=verified-binaries "
+        output = ssh(command+"bash", timeout=args.install_timeout, log_path=out/'install.log')
         fixture = next(json.loads(line) for line in reversed(output.splitlines()) if line.startswith('{"result": "passed"'))
         status["fixture"] = fixture
         name = fixture["service"]
