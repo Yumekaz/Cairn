@@ -484,6 +484,8 @@ func (s *Server) execDeployRunHealthCheck(ctx *duraflow.StepContext) error {
 }
 
 func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	input, err := decodeDeployInput(ctx.InputJSON)
 	if err != nil {
 		return err

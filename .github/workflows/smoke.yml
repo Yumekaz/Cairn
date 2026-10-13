@@ -119,4 +119,4 @@ jobs:
 
       - name: Note on full reliability gate
         run: |
-          echo "Full stability_gate.sh / failure_matrix.sh require Linux + Mini-Docker root and are not run on GitHub-hosted runners."
+          echo "The stateful-spine job runs real privileged Mini-Docker deployment and real database recovery. VM reboot/crash, browser controls and elapsed-time soaks retain separate acceptance evidence."

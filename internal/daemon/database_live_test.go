@@ -102,7 +102,10 @@ func TestLivePostgresBackupRestore(t *testing.T) {
 	if image := os.Getenv("CAIRN_TEST_POSTGRES_IMAGE"); image != "" {
 		_, _, service, _ := newLiveDatabaseFixture(t, "postgres", image)
 		database = service.RuntimeID
-		liveDatabaseReady(t, database, "pg_isready", "-U", "postgres")
+		// The official entrypoint temporarily serves a Unix socket during
+		// initialization, then shuts that server down. TCP only becomes ready
+		// on the final server; a socket-only probe races that shutdown.
+		liveDatabaseReady(t, database, "pg_isready", "-h", "127.0.0.1", "-U", "postgres")
 	}
 	if database == "" {
 		t.Skip("set CAIRN_TEST_POSTGRES_CONTAINER to a disposable PostgreSQL container")

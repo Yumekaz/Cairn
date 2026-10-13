@@ -40,6 +40,11 @@ type Server struct {
 	dfWorker  *dfworker.WorkerDaemon
 	dfStore   dfstore.EventStore
 
+	// Lifecycle handlers and reconciliation must not concurrently stop/start
+	// the same generation. A restart during stop cleanup can leave stale NAT
+	// rules and can overwrite an operator's stopped desired state.
+	lifecycleMu sync.Mutex
+
 	// crashLoop tracks process-local auto-restart times for reconcile thrash bounds.
 	crashLoopMu sync.Mutex
 	crashLoop   *CrashLoopTracker
@@ -307,6 +312,8 @@ func (s *Server) BackupMetadata() error {
 }
 
 func (s *Server) ReconcileServices(ctx context.Context) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if s.runtime == nil {
 		return
 	}

@@ -72,7 +72,7 @@ write_report() {
     printf '%s\n' \
       '- Browser/dashboard acceptance is interactive and is not inferred from unit tests; see `docs/VALIDATION_2026-09.md`.' \
       '- Real PostgreSQL, Redis, and MongoDB data-path tests need explicit disposable database endpoints; mocked command tests do not count as real-database proof.' \
-      '- Root-only runtime tests, VM reboot, true disk-full/power-loss tests, multi-day soak, and independent hostile-workload review require a separately isolated environment.'
+      '- Privileged runtime, VM reboot/crash, bounded disk-full, separately recorded 2–4-hour soaks and scoped security checks have separate retained evidence; physical power-loss and independent hostile-tenant audits are not inferred.'
   } >"$REPORT"
 }
 
@@ -213,7 +213,7 @@ fi
 record_blocked cairn-dashboard-browser 'manual browser acceptance is not inferred from this shell runner; consult the retained validation record'
 record_blocked host-reboot-and-crash 'requires an isolated disposable VM; the host is not rebooted by this script'
 record_blocked disk-full-and-power-loss 'requires a bounded disposable filesystem/VM; this script will not fill host storage'
-record_blocked sustained-soak '24-72 hour monitored run is not completed by this bounded test suite'
+record_blocked sustained-soak 'requires two separately recorded 2-hour sessions with zero errors and final restore; interrupted runs do not count and durations are not combined'
 record_blocked hostile-workload-security 'requires a separate threat model and isolated adversarial review'
 
 write_report complete

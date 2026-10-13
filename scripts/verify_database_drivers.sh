@@ -27,7 +27,8 @@ cleanup() { docker logs "$DB_ID" >"$OUT/postgres.log" 2>&1 || true; docker rm -f
 trap cleanup EXIT
 ready=0
 for attempt in $(seq 1 30); do
-  if docker exec "$DB_ID" pg_isready -U postgres >"$OUT/readiness.log" 2>&1; then ready=1; break; fi
+  # Do not accept the entrypoint's temporary Unix-socket-only init server.
+  if docker exec "$DB_ID" pg_isready -h 127.0.0.1 -U postgres >"$OUT/readiness.log" 2>&1; then ready=1; break; fi
   sleep 1
 done
 [[ "$ready" == 1 ]] || { echo 'Disposable PostgreSQL did not become ready' >&2; exit 1; }

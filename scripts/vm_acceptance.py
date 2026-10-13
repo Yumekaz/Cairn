@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--install-timeout", type=int, default=3600)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--install-mode", choices=['source','verified-binaries'], default='source')
+    parser.add_argument("--resume-installed", action="store_true")
     args = parser.parse_args()
     image = args.image.resolve()
     manifest = image.parent / "SHA256SUMS"
@@ -40,7 +41,9 @@ def main():
         previous=json.loads((args.output/'status.json').read_text())
         if previous.get('image_sha256')!=digest or previous.get('checks'):
             raise RuntimeError('resume is limited to this same image before any recovery gate passed')
-        (args.output/'previous-status.json').write_text(json.dumps(previous,indent=2))
+        (args.output/f'previous-status-{time.time_ns()}.json').write_text(json.dumps(previous,indent=2))
+        if args.resume_installed and not previous.get('fixture'):
+            raise RuntimeError('no completed disposable installation fixture to resume')
     else:
         args.output.mkdir(parents=True, exist_ok=False)
     out = args.output.resolve()
@@ -155,14 +158,21 @@ def main():
         save("fresh-install-and-notes-proof")
         command="tar -xOf /home/ubuntu/source.tar SERVER/scripts/vm/install_and_prove.sh | "
         if args.install_mode=='verified-binaries': command+="env CAIRN_VM_INSTALL_MODE=verified-binaries "
-        output = ssh(command+"bash", timeout=args.install_timeout, log_path=out/'install.log')
-        fixture = next(json.loads(line) for line in reversed(output.splitlines()) if line.startswith('{"result": "passed"'))
+        if args.resume_installed:
+            fixture=previous['fixture']
+        else:
+            output = ssh(command+"bash", timeout=args.install_timeout, log_path=out/'install.log')
+            fixture = next(json.loads(line) for line in reversed(output.splitlines()) if line.startswith('{"result": "passed"'))
         status["fixture"] = fixture
         name = fixture["service"]
         if not re.fullmatch(r"notes-proof-[0-9a-f]{8}", name):
             raise RuntimeError("unexpected test-service name")
-        ssh(f"/home/ubuntu/.local/bin/cairn start {name}; curl --fail --silent --data 'before-reboot' http://127.0.0.1:8089/cgi-bin/notes")
-        expected_data = "first\nbefore-reboot\n"
+        # Reboot/resume may already have reconciled the installed service.
+        # Read its desired state rather than issuing a duplicate Start.
+        service = json.loads(ssh(f"curl --fail --silent --unix-socket /home/ubuntu/.cairn/cairnd.sock http://localhost/services/{name}"))
+        if service.get('desired_state') != 'running':
+            ssh(f"/home/ubuntu/.local/bin/cairn start {name}")
+        expected_data = "first\n"
         def verify_data():
             deadline = time.monotonic() + 60
             last = ""
@@ -175,6 +185,9 @@ def main():
                     last = str(exc)
                 time.sleep(2)
             raise AssertionError(f"VM recovery did not restore serving data: {last}")
+        verify_data()
+        ssh("curl --fail --silent --show-error --data 'before-reboot' http://127.0.0.1:8089/cgi-bin/notes")
+        expected_data = "first\nbefore-reboot\n"
         verify_data()
         status["checks"]["fresh_install"] = "passed"
         save("guest-graceful-reboot")

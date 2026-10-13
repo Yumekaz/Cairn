@@ -680,11 +680,11 @@ func (s *Server) performRedisDumpBackup(vol *api.Volume, dbService *api.Service,
 	// Run as the daemon user: root-owned dump files (e.g. redis --rdb 0640)
 	// would be unreadable by cairnd afterwards.
 	taskCfg := &api.ServiceConfig{
-		User:    fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-		Name:    dbServiceConfig.Name,
-		Kind:    dbServiceConfig.Kind,
-		Image:   dbServiceConfig.Image,
-		Command: redisDumpCommand(dbIP),
+		User:        fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		Name:        dbServiceConfig.Name,
+		Kind:        dbServiceConfig.Kind,
+		Image:       dbServiceConfig.Image,
+		Command:     redisDumpCommand(dbIP),
 		Environment: environment,
 		Volumes: []api.VolumeConfig{
 			{
@@ -1026,6 +1026,8 @@ func (s *Server) failDeploy(deploy *api.Deploy, svc *api.Service, reason string)
 }
 
 func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	name := chi.URLParam(r, "name")
 	svc, err := s.store.GetServiceByName(name)
 	if err != nil {
@@ -1066,6 +1068,8 @@ func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStopService(w http.ResponseWriter, r *http.Request) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	name := chi.URLParam(r, "name")
 	svc, err := s.store.GetServiceByName(name)
 	if err != nil {
@@ -1102,6 +1106,8 @@ func (s *Server) handleStopService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartService(w http.ResponseWriter, r *http.Request) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	name := chi.URLParam(r, "name")
 	svc, err := s.store.GetServiceByName(name)
 	if err != nil {
