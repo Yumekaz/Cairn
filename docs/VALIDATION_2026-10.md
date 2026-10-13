@@ -1,4 +1,4 @@
-# Acceptance evidence — 2026-10-08
+# Acceptance evidence — 2026-10-08 through 2026-10-13
 
 This record describes demonstrated behavior, not a zero-bug or production-ready guarantee.
 
@@ -38,6 +38,8 @@ Additional retained proofs:
 - Dashboard status polling re-enabled invalid lifecycle/confirmation actions. Semantic and busy guards now survive polling/reconnect. Responses for an earlier volume selection cannot replace the current backup view, and modal focus can return to a replaced Inspect button.
 - Mini-Docker supervisors inherited the daemon listener. After daemon shutdown, orphaned supervisors kept an unserved socket alive. The child now preserves only stdio and its startup pipes before opening its own logs/metadata. Legacy test workloads were stopped through an explicitly scoped temporary API, and the normal runtime recovered without killing arbitrary processes or deleting their data. Startup metadata is published before child release, and restart metadata clears the previous exit/finish fields.
 - Service/volume names could contain filesystem path components. The API now rejects separators and invalid single-component names before creating records or directories.
+- The official PostgreSQL entrypoint temporarily starts a socket-only initialization server. A readiness probe accepted it just before its shutdown, intermittently failing the real-database CI fixture. Both probes now require the final TCP listener; the actual PostgreSQL restore test passed five fresh-container repetitions.
+- Reconciliation could restart a container during Stop cleanup, leaving duplicate/stale NAT rules that masked a subsequent deployment. Lifecycle operations, removal, reconciliation and deployment route commit/cleanup now serialize. The Stop regression passed 20 repetitions and the real notes restart/redeploy/restore flow passed after scoped stale-route cleanup.
 
 ## Dashboard live browser acceptance
 
@@ -63,9 +65,13 @@ Full audit history remains available. Date formatters are cached and DOM updates
 
 The user replaced the continuous 24-hour gate with separately recorded 2–4-hour sessions. The release checklist uses two independent two-hour sessions: baseline (15-second samples, three verified reads per write) and higher request rate (5-second samples, nine reads per write). `validation-runs/soak-sessions.json` is the session ledger. Interrupted/failed runs do not count, and durations are never combined into an uninterrupted 24-hour claim.
 
-The first session is running under `cairn-soak-session-1.service`, with status/samples in `validation-runs/soak-session-1/`; the second remains not started. Each records latency, memory, CPU, data/disk size and process-identity restart counts, and requires a final verified snapshot restore and successful cleanup. The previous roughly 50-minute run is retained as interrupted; two failed bootstrap smokes remain failed. The corrected resource smoke passed after the listener defect was repaired. The existing monitor was updated in place, not duplicated.
+The first session passed: 7211.49 seconds, 1912 requests, zero errors and verified final restore. It recorded two daemon restarts and no application-runtime restart. Evidence: `validation-runs/soak-session-1/`. The original higher-rate attempt failed at 4363.19 seconds when its runtime/daemon units were stopped; it does not count. The October 13 replacement bootstrap reproduced the Stop/reconcile/NAT defect above and remains failed. After the fix and a successful real lifecycle proof, a new attempt is running in `validation-runs/soak-session-2c-20261013/` under `cairn-soak-session-2c-20261013.service`. It is not a completed session until its own duration, zero-error, final-restore and cleanup conditions pass.
 
-The fresh-OS/reboot gate uses `scripts/vm_acceptance.py`, a checksum-verified official Ubuntu 24.04 cloud image, an 8GiB disposable overlay, 2GiB RAM and two TCG-emulated CPUs. Two attempts hit bounded boot/provisioning timeouts and remain failed, not product passes. The second disposable disk is being resumed only because no recovery gate had passed and no Cairn instance had been installed. Old status/source snapshots remain saved; new installer output streams to a durable log. Current evidence is in `validation-vms/proof2-20261008/`. This gate is not passed until installation, guest reboot and abrupt guest shutdown each preserve the known journal. No host reboot is part of this proof.
+Each session retains latency, memory, CPU, data/disk size and process-identity restart counts. The previous roughly 50-minute run is retained as interrupted; failed bootstrap smokes remain failed. The existing monitor was updated in place, not duplicated, and reads the ledger's current attempt paths.
+
+The fresh-OS/reboot gate uses `scripts/vm_acceptance.py`, a checksum-verified official Ubuntu 24.04 cloud image, an 8GiB disposable overlay, 2GiB RAM and two TCG-emulated CPUs. The installed guest passed actual notes write/restart/redeploy/backup/restore, guest graceful reboot and abrupt QEMU shutdown, preserving the known journal. Evidence is in `validation-vms/proof2-20261008/`, including timestamped previous statuses, source/revision snapshots, checksum manifests and guest journal. No host reboot occurred.
+
+Installation used checksum-verified locally built static Cairn binaries and a locally built Mini-Docker wheel installed offline. Clean source compilation is separately proved in GitHub CI; cold source compilation in TCG hit bounded timeouts and is not reported as passed. Earlier failed provisioning and runner-readiness attempts remain retained. An explicit final-code reinstallation and complete nine-test integration run is currently in progress on the same disposable guest; it must execute without skips, and its later recovery result must not overwrite the earlier pass silently.
 
 ## Exact-commit GitHub checks
 
@@ -76,7 +82,9 @@ The fresh-OS/reboot gate uses `scripts/vm_acceptance.py`, a checksum-verified of
 | Mini-Docker | `5c83126f83fcd21355e5931d0fbabde838dd7e9b` | [Tests](https://github.com/Yumekaz/Mini-Docker/actions/runs/37805283091), [strict lint/security](https://github.com/Yumekaz/Mini-Docker/actions/runs/37805283136), [privileged runtime](https://github.com/Yumekaz/Mini-Docker/actions/runs/37805283074) passed |
 | DuraFlow | `04eeb9fccc3100359825f31d6af630707bf11985` | [Verification passed](https://github.com/Yumekaz/DURAFLOW/actions/runs/37808843799); prior failure was corrected with owned private runtime state, not weaker isolation or permissions |
 | FailForge | `f49a1182096ff3d056200f1e12f083868710bf0a` | [Verification and covered campaigns passed](https://github.com/Yumekaz/FAILFORGE/actions/runs/37807438461) |
-| Cairn | Working-tree closeout changes | Final push/check remains pending |
+| Cairn | `2c85e55443ee6419a29ac61cd6e023b60e81daac` | [Lifecycle/readiness candidate passed](https://github.com/Yumekaz/Cairn/actions/runs/38431041688); additional proxy/focus/runner changes still require their own final pushed checks |
+
+The complete exact-head snapshot is retained in `validation-runs/github-lifecycle-retry-oct13/`. An earlier snapshot hit a network read timeout before recording the sixth repository; it is incomplete, not green. The collector now has bounded transient retries and retains non-green error records for every repository instead of abandoning the report. Regression tests exercise both behavior and permanent errors.
 
 ## Security scope and remaining limits
 

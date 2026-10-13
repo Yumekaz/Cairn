@@ -20,7 +20,7 @@ import hashlib,json
 from pathlib import Path
 expected=json.loads(Path('bin/binary-hashes.json').read_text())
 for name,digest in expected.items():
-    assert name in {'cairn','cairnd'}
+    assert name in {'cairn','cairnd','cairn-integration-tests'}
     assert hashlib.file_digest(Path('bin',name).open('rb'),'sha256').hexdigest()==digest
 print('Verified installation binary checksums; clean source compilation is a separate CI gate')
 PY
@@ -53,9 +53,23 @@ sudo install -m 644 scripts/vm/mini-docker.service /etc/systemd/system/cairn-pro
 sudo install -m 644 scripts/vm/cairn.service /etc/systemd/system/cairn-proof-daemon.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now cairn-proof-runtime.service cairn-proof-daemon.service
+# Reverification must actually run the newly installed executable, not an
+# already-active daemon retaining its old mapped binary.
+sudo systemctl restart cairn-proof-daemon.service
 for attempt in $(seq 1 60); do
   if /home/ubuntu/.local/bin/cairn doctor; then break; fi
   sleep 1
 done
 /home/ubuntu/.local/bin/cairn doctor
+if [[ "${CAIRN_VM_INTEGRATION_PROOF:-0}" == 1 ]]; then
+  CAIRN_ROOTFS=/opt/cairn-stack/Mini-Docker/rootfs MINI_DOCKER_SOCKET=/run/cairn-proof/mini-docker.sock \
+    bin/cairn-integration-tests -test.v -test.timeout 15m | tee /home/ubuntu/cairn-integration.log
+  python3 - <<'PY'
+from pathlib import Path
+log=Path('/home/ubuntu/cairn-integration.log').read_text()
+assert log.count('--- PASS: Test') >= 9, 'complete integration suite did not execute'
+assert '--- SKIP:' not in log, 'required integration checks were skipped'
+assert '\nPASS\n' in log, 'integration suite did not pass'
+PY
+fi
 NOTES_PROOF_PORT=8089 python3 scripts/notes_smoke.py

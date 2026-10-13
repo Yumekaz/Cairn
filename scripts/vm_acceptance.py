@@ -27,7 +27,11 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--install-mode", choices=['source','verified-binaries'], default='source')
     parser.add_argument("--resume-installed", action="store_true")
+    parser.add_argument("--reverify-installed", action="store_true", help="explicitly install final code on a previously passed guest and repeat its recovery proof")
+    parser.add_argument("--integration-proof", action="store_true", help="run the complete integration suite inside the disposable guest")
     args = parser.parse_args()
+    if args.integration_proof and args.install_mode != 'verified-binaries':
+        parser.error('--integration-proof requires verified-binaries mode')
     image = args.image.resolve()
     manifest = image.parent / "SHA256SUMS"
     expected = next(line.split()[0] for line in manifest.read_text().splitlines()
@@ -39,14 +43,20 @@ def main():
         probe.bind(("127.0.0.1", args.ssh_port))
     if args.resume:
         previous=json.loads((args.output/'status.json').read_text())
-        if previous.get('image_sha256')!=digest or previous.get('checks'):
-            raise RuntimeError('resume is limited to this same image before any recovery gate passed')
+        if previous.get('image_sha256')!=digest:
+            raise RuntimeError('resume requires this same verified image')
+        if previous.get('checks') and not (args.reverify_installed and previous.get('state') == 'passed'):
+            raise RuntimeError('completed gates require explicit --reverify-installed; never discard partial recovery evidence')
         (args.output/f'previous-status-{time.time_ns()}.json').write_text(json.dumps(previous,indent=2))
         if args.resume_installed and not previous.get('fixture'):
             raise RuntimeError('no completed disposable installation fixture to resume')
     else:
         args.output.mkdir(parents=True, exist_ok=False)
     out = args.output.resolve()
+    if (args.resume_installed or args.reverify_installed) and not args.resume:
+        parser.error('installed-state options require --resume')
+    if args.resume_installed and args.reverify_installed:
+        parser.error('choose resume without reinstalling OR explicit final-code reinstallation')
     status = {"state": "preparing", "image_sha256": digest, "started_unix": time.time(),
               "limits": {"disk_gib": 8, "ram_mib": 2048, "vcpus": 2}, "checks": {}}
     def save(phase):
@@ -82,6 +92,8 @@ def main():
     if args.install_mode=='verified-binaries':
         for binary in ('cairn','cairnd'):
             run(['go','build','-o',str(ROOT/'bin'/binary),'./cmd/'+binary],timeout=180)
+        if args.integration_proof:
+            run(['go','test','-c','-o',str(ROOT/'bin/cairn-integration-tests'),'./tests/integration'],timeout=180)
         wheel_dir=out/f'runtime-wheel-{int(time.time())}'
         run([str(ROOT.parent/'Mini-Docker/venv/bin/python'),'-m','build','--wheel','--no-isolation','--outdir',str(wheel_dir),str(ROOT.parent/'Mini-Docker')],timeout=180)
     with tarfile.open(out / "source.tar", "w") as archive:
@@ -102,7 +114,7 @@ def main():
         archive.add(busybox.resolve(), arcname="Mini-Docker/rootfs/bin/busybox", recursive=False)
         if args.install_mode=='verified-binaries':
             hashes={}
-            for binary in ('cairn','cairnd'):
+            for binary in ('cairn','cairnd') + (('cairn-integration-tests',) if args.integration_proof else ()):
                 path=ROOT/'bin'/binary
                 hashes[binary]=hashlib.file_digest(path.open('rb'),'sha256').hexdigest()
                 archive.add(path,arcname='SERVER/bin/'+binary,recursive=False)
@@ -156,13 +168,25 @@ def main():
         for filename in ("source.tar", "go-toolchain.tgz"):
             run(["scp", *key_options, "-P", str(args.ssh_port), str(out / filename), "ubuntu@127.0.0.1:/home/ubuntu/"], timeout=300)
         save("fresh-install-and-notes-proof")
+        if args.reverify_installed:
+            old_name = previous['fixture']['service']
+            if not re.fullmatch(r"notes-proof-[0-9a-f]{8}", old_name):
+                raise RuntimeError('unexpected previous disposable fixture name')
+            # Reinstall final code, but keep the previous pass and its data.
+            old_service=json.loads(ssh(f"curl --fail --silent --unix-socket /home/ubuntu/.cairn/cairnd.sock http://localhost/services/{old_name}"))
+            if old_service.get('desired_state') == 'running':
+                ssh(f"/home/ubuntu/.local/bin/cairn stop {old_name}")
         command="tar -xOf /home/ubuntu/source.tar SERVER/scripts/vm/install_and_prove.sh | "
-        if args.install_mode=='verified-binaries': command+="env CAIRN_VM_INSTALL_MODE=verified-binaries "
+        command += "env "
+        if args.install_mode=='verified-binaries': command+="CAIRN_VM_INSTALL_MODE=verified-binaries "
+        if args.integration_proof: command+="CAIRN_VM_INTEGRATION_PROOF=1 "
         if args.resume_installed:
             fixture=previous['fixture']
         else:
             output = ssh(command+"bash", timeout=args.install_timeout, log_path=out/'install.log')
             fixture = next(json.loads(line) for line in reversed(output.splitlines()) if line.startswith('{"result": "passed"'))
+        if args.integration_proof:
+            status['checks']['full_integration_suite']='passed'
         status["fixture"] = fixture
         name = fixture["service"]
         if not re.fullmatch(r"notes-proof-[0-9a-f]{8}", name):

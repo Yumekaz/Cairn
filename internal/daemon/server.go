@@ -168,7 +168,7 @@ func (s *Server) Start(ctx context.Context) error {
 		if err == nil {
 			log.Printf("cairnd: Dashboard and API TCP server listening on http://%s", s.config.DashboardAddr)
 			httpServerTCP := &http.Server{
-				Handler:           dashboardHTTPGuard(s, s.config.DashboardAddr),
+				Handler:           s.tcpHTTPHandler(),
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 			go func() {

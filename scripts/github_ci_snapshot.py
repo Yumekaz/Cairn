@@ -5,12 +5,30 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import time
+import urllib.error
 import urllib.request
 
 ROOT=Path(__file__).resolve().parent.parent
 PROJECTS=[('SERVER','Cairn',{'smoke'}),('Mini-Docker','Mini-Docker',{'Tests','Lint','Root Runtime Validation'}),
           ('DURAFLOW','DURAFLOW',{'Verification'}),('FAILFORGE','FAILFORGE',{'Verification'}),
           ('Mini-Redis-Cassandra','Mini-Redis-Cassandra',{'Verification'}),('Coordination-service','Coordination-service',{'Verification'})]
+
+
+def fetch_runs(request, opener=urllib.request.urlopen, pause=time.sleep):
+    """Bound transient transport failures; missing evidence never becomes green."""
+    for attempt in range(3):
+        try:
+            with opener(request, timeout=30) as response:
+                return json.load(response)
+        except (TimeoutError, OSError, urllib.error.URLError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+                if exc.code not in (429, 500, 502, 503, 504):
+                    raise
+            if attempt == 2:
+                raise
+            pause(2 ** attempt)
 
 
 def main():
@@ -25,8 +43,15 @@ def main():
         commit=subprocess.check_output(['git','-C',str(directory),'rev-parse','HEAD'],text=True).strip()
         url=f'https://api.github.com/repos/Yumekaz/{remote}/actions/runs?head_sha={commit}&per_page=100'
         request=urllib.request.Request(url,headers={'User-Agent':'Cairn-acceptance','Accept':'application/vnd.github+json'})
-        with urllib.request.urlopen(request,timeout=30) as response:
-            payload=json.load(response)
+        try:
+            payload=fetch_runs(request)
+        except (TimeoutError, OSError, urllib.error.URLError, ValueError) as exc:
+            item={'repository':f'Yumekaz/{remote}','commit':commit,'result':'not-passed',
+                  'missing_workflows':sorted(required),'runs':[], 'error':str(exc)}
+            report['repositories'].append(item);complete=False
+            (args.output/'report.json').write_text(json.dumps(report,indent=2))
+            print(remote,commit,'not-passed: could not obtain GitHub evidence',flush=True)
+            continue
         (args.output/f'{remote}-runs.json').write_text(json.dumps(payload,indent=2))
         latest={}
         for run in payload.get('workflow_runs',[]):

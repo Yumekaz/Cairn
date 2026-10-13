@@ -112,10 +112,20 @@ jobs:
         run: |
           go build -o bin/cairn ./cmd/cairn
           go build -o bin/cairnd ./cmd/cairnd
+      - name: Supported source installation on clean Linux runner
+        run: |
+          bash scripts/install.sh
+          test -x "$HOME/.local/bin/cairn"
+          test -x "$HOME/.local/bin/cairnd"
+          "$HOME/.local/bin/cairn" --help
 
       - name: Demo script dry syntax check
         run: |
           for s in scripts/*.sh scripts/vm/*.sh; do bash -n "$s"; done
+      - name: Verification runner regressions
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Dashboard focus regressions
+        run: node --test scripts/dashboard_focus.test.cjs
 
       - name: Note on full reliability gate
         run: |

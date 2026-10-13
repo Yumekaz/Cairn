@@ -582,6 +582,10 @@ document.addEventListener('DOMContentLoaded', () => {
       modal,
       returnTo: document.activeElement instanceof HTMLElement ? document.activeElement : null,
       returnToServiceName: document.activeElement instanceof HTMLElement ? document.activeElement.dataset.serviceName : null,
+      returnToId: document.activeElement instanceof HTMLElement ? document.activeElement.id : null,
+      returnToBackupId: document.activeElement instanceof HTMLElement ? document.activeElement.dataset.backupId : null,
+      returnToVolumeName: document.activeElement instanceof HTMLElement ? document.activeElement.dataset.volumeName : null,
+      returnToDeployId: document.activeElement instanceof HTMLElement ? document.activeElement.dataset.deployId : null,
     });
     modal.classList.remove('hidden');
     requestAnimationFrame(() => {
@@ -598,16 +602,27 @@ document.addEventListener('DOMContentLoaded', () => {
     modal.classList.add('hidden');
     let returnTo = null;
     let returnToServiceName = null;
+    let opener = null;
     for (let i = modalFocusStack.length - 1; i >= 0; i--) {
       if (modalFocusStack[i].modal === modal) {
         returnTo = modalFocusStack[i].returnTo;
         returnToServiceName = modalFocusStack[i].returnToServiceName;
+        opener = modalFocusStack[i];
         modalFocusStack.splice(i, 1);
         break;
       }
     }
-    if (returnToServiceName && (!returnTo || !document.contains(returnTo))) {
-      returnTo = Array.from(document.querySelectorAll('.btn-inspect')).find((el) => el.dataset.serviceName === returnToServiceName);
+    if (!returnTo || !document.contains(returnTo)) {
+      if (opener && opener.returnToId) {
+        returnTo = document.getElementById(opener.returnToId);
+      } else if (opener && opener.returnToBackupId) {
+        returnTo = Array.from(document.querySelectorAll('.btn-restore')).find((el) =>
+          el.dataset.backupId === opener.returnToBackupId && el.dataset.volumeName === opener.returnToVolumeName);
+      } else if (opener && opener.returnToDeployId) {
+        returnTo = Array.from(document.querySelectorAll('.btn-rollback')).find((el) => el.dataset.deployId === opener.returnToDeployId);
+      } else if (returnToServiceName) {
+        returnTo = Array.from(document.querySelectorAll('.btn-inspect')).find((el) => el.dataset.serviceName === returnToServiceName);
+      }
     }
     if (returnTo && typeof returnTo.focus === 'function' && isFocusableVisible(returnTo)) {
       returnTo.focus();
@@ -1119,7 +1134,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="backup-subtext text-mono" style="font-size:10px;">SHA256: ${checksum}</span>
           </div>
           <div>
-            <button type="button" class="btn btn-secondary btn-sm btn-restore needs-online" data-state-disabled="${restorable ? '0' : '1'}" ${isOnline && restorable ? '' : 'disabled'} title="${restorable ? 'Restore this snapshot' : 'Only successful snapshots can be restored'}" style="padding:4px 8px;font-size:11px;">Restore</button>
+            <button type="button" class="btn btn-secondary btn-sm btn-restore needs-online" data-backup-id="${escapeHtml(b.id || '')}" data-volume-name="${escapeHtml(volumeName)}" data-state-disabled="${restorable ? '0' : '1'}" ${isOnline && restorable ? '' : 'disabled'} title="${restorable ? 'Restore this snapshot' : 'Only successful snapshots can be restored'}" style="padding:4px 8px;font-size:11px;">Restore</button>
           </div>`;
         item.querySelector('.btn-restore').addEventListener('click', () =>
           triggerRestoreBackup(volumeName, b.id)

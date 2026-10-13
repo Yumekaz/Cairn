@@ -1178,6 +1178,8 @@ func (s *Server) handleRestartService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	name := chi.URLParam(r, "name")
 	svc, err := s.store.GetServiceByName(name)
 	if err != nil {

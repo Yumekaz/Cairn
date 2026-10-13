@@ -5,7 +5,32 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/yumekaz/cairn/internal/api"
 )
+
+// Service virtual hosts are application routes, not alternate admin origins.
+// ServeHTTP never falls back to the admin router for these hosts, even when
+// the service does not exist. Keep the strict guard on the control plane.
+func (s *Server) tcpHTTPHandler() http.Handler {
+	admin := dashboardHTTPGuard(s, s.config.DashboardAddr)
+	_, listenPort, _ := net.SplitHostPort(s.config.DashboardAddr)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if parsedHost, port, err := net.SplitHostPort(host); err == nil {
+			if port != listenPort {
+				admin.ServeHTTP(w, r)
+				return
+			}
+			host = parsedHost
+		}
+		if strings.HasSuffix(host, ".localhost") && api.ValidResourceName(strings.TrimSuffix(host, ".localhost")) {
+			s.ServeHTTP(w, r)
+			return
+		}
+		admin.ServeHTTP(w, r)
+	})
+}
 
 // The TCP dashboard is a local admin API, not an authenticated multi-tenant
 // endpoint. Reject browser cross-origin calls and unexpected Host headers;

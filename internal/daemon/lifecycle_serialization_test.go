@@ -34,8 +34,19 @@ func (r *stoppingRuntime) StartContainer(context.Context, string) error {
 func (r *stoppingRuntime) ListContainers(context.Context) ([]*runtime.ContainerInfo, error) {
 	return nil, nil
 }
+func (r *stoppingRuntime) RemoveContainer(ctx context.Context, id string) error {
+	return r.StopContainer(ctx, id)
+}
 
 func TestStopCannotBeUndoneByReconciliation(t *testing.T) {
+	testLifecycleCannotBeUndoneByReconciliation(t, false)
+}
+
+func TestRemovalCannotBeUndoneByReconciliation(t *testing.T) {
+	testLifecycleCannotBeUndoneByReconciliation(t, true)
+}
+
+func testLifecycleCannotBeUndoneByReconciliation(t *testing.T, remove bool) {
 	s, st, cleanup := setupDaemonStore(t)
 	defer cleanup()
 	now := time.Now()
@@ -48,7 +59,12 @@ func TestStopCannotBeUndoneByReconciliation(t *testing.T) {
 	response := httptest.NewRecorder()
 	stopDone := make(chan struct{})
 	go func() {
-		s.handleStopService(response, withChiURLParam(httptest.NewRequest("POST", "/services/lifecycle-proof/stop", nil), "name", svc.Name))
+		request := withChiURLParam(httptest.NewRequest("POST", "/services/lifecycle-proof/stop", nil), "name", svc.Name)
+		if remove {
+			s.handleRemoveService(response, request)
+		} else {
+			s.handleStopService(response, request)
+		}
 		close(stopDone)
 	}()
 	<-r.stopped
@@ -69,6 +85,12 @@ func TestStopCannotBeUndoneByReconciliation(t *testing.T) {
 		t.Fatal("reconciliation restarted a container the operator was stopping")
 	}
 	got, err := st.GetService(svc.ID)
+	if remove {
+		if err != nil || got != nil {
+			t.Fatalf("removed service resurrected: %+v %v", got, err)
+		}
+		return
+	}
 	if err != nil || got.DesiredState != "stopped" || got.ActualState != "stopped" {
 		t.Fatalf("stop intent overwritten: %+v %v", got, err)
 	}

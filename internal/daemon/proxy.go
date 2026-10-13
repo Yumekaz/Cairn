@@ -70,6 +70,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			proxy.ServeHTTP(w, r)
 			return
 		}
+		// A service virtual host must never become an admin origin just because
+		// its service was removed or has not been registered yet.
+		http.NotFound(w, r)
+		return
 	}
 
 	// Fallback to normal control plane dashboard/API router
