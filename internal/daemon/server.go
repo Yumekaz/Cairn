@@ -145,6 +145,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.dfWorker.Start(); err != nil {
 		log.Printf("cairnd: Warning: failed to start background worker: %v", err)
 	}
+	// Do not return while the old generation still owns worker goroutines.
+	// This also makes an in-process recovery fixture wait for real shutdown,
+	// rather than guessing with a sleep and closing stores under live work.
+	defer s.dfWorker.Stop()
 	s.logIncompleteWorkflowRecovery()
 
 	// Graceful worker shutdown

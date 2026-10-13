@@ -62,16 +62,33 @@ def main():
     def save(phase):
         status["state"] = phase
         status["updated_unix"] = time.time()
-        (out / "status.json").write_text(json.dumps(status, indent=2))
+        temporary = out / 'status.pending'
+        with temporary.open('w') as stream:
+            stream.write(json.dumps(status, indent=2)); stream.flush(); os.fsync(stream.fileno())
+        temporary.replace(out / 'status.json')
+        directory_fd=os.open(out,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(directory_fd)
+        finally: os.close(directory_fd)
         print(phase, flush=True)
     def run(argv, timeout=120, log_path=None):
+        started=time.time()
         if log_path:
             with log_path.open('a') as stream:
+                stream.seek(0,os.SEEK_END)
+                offset=stream.tell()
                 result=subprocess.run(argv,stdout=stream,stderr=subprocess.STDOUT,text=True,timeout=timeout)
+            with (out/'commands.jsonl').open('a') as evidence:
+                evidence.write(json.dumps({'argv':argv,'started_unix':started,'exit_code':result.returncode,'log':str(log_path),'offset':offset})+'\n')
             if result.returncode:
                 raise RuntimeError(f'{argv[0]} failed; retained output: {log_path}')
-            return log_path.read_text()
+            # Earlier successful fixture output must not satisfy a resumed
+            # invocation that produced no new proof of its own.
+            with log_path.open() as stream:
+                stream.seek(offset)
+                return stream.read()
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        with (out/'commands.jsonl').open('a') as evidence:
+            evidence.write(json.dumps({'argv':argv,'started_unix':started,'exit_code':result.returncode})+'\n')
         if result.returncode:
             raise RuntimeError(f"{argv[0]} failed: {result.stderr[-3000:]}")
         return result.stdout
@@ -130,9 +147,10 @@ def main():
             archive.add(wheel_manifest,arcname='SERVER/bin/wheel-hashes.json',recursive=False)
             status['installation_mode']='verified-binaries; source build separately tested in GitHub CI'
     (out / "revisions.json").write_text(json.dumps(revisions, indent=2))
-    goroot = Path(run(["go", "env", "GOROOT"]).strip())
-    if not (args.resume and (out/'go-toolchain.tgz').exists()):
-        run(["tar", "--transform", f"s,^{re.escape(goroot.name)},go,", "-czf", str(out / "go-toolchain.tgz"), "-C", str(goroot.parent), goroot.name], timeout=180)
+    if args.install_mode == 'source':
+        goroot = Path(run(["go", "env", "GOROOT"]).strip())
+        if not (args.resume and (out/'go-toolchain.tgz').exists()):
+            run(["tar", "--transform", f"s,^{re.escape(goroot.name)},go,", "-czf", str(out / "go-toolchain.tgz"), "-C", str(goroot.parent), goroot.name], timeout=180)
     key_options = ["-i", str(out / "guest-key"), "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
                    "-o", f"UserKnownHostsFile={out / 'known-hosts'}", "-o", "ConnectTimeout=20"]
     def ssh(command, timeout=60, log_path=None):
@@ -165,7 +183,7 @@ def main():
         save("booting-fresh-linux")
         start_vm()
         boot = ready()
-        for filename in ("source.tar", "go-toolchain.tgz"):
+        for filename in ("source.tar",) + (("go-toolchain.tgz",) if args.install_mode == 'source' else ()):
             run(["scp", *key_options, "-P", str(args.ssh_port), str(out / filename), "ubuntu@127.0.0.1:/home/ubuntu/"], timeout=300)
         save("fresh-install-and-notes-proof")
         if args.reverify_installed:

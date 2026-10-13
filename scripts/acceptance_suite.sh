@@ -164,10 +164,10 @@ capture_revisions Coordination "$PARENT/Coordination-service"
 ROOTFS="${CAIRN_ROOTFS:-$PARENT/Mini-Docker/rootfs}"
 if [[ -x "$ROOTFS/bin/busybox" || -x "$ROOTFS/bin/sh" ]]; then
   run_check cairn-go "$ROOT" 'isolated Go unit packages' env "CAIRN_ROOTFS=$ROOTFS" go test ./cmd/... ./internal/... -count=1 -timeout 15m
-  if [[ "${ACCEPTANCE_LIVE_CAIRN:-0}" == 1 ]]; then
+  if [[ "${ACCEPTANCE_LIVE_CAIRN:-0}" == 1 && -n "${CAIRN_TEST_HOME:-}" ]]; then
     run_check cairn-live-integration "$ROOT" 'explicit live fixtures; requires disposable Cairn home/runtime' env "CAIRN_ROOTFS=$ROOTFS" go test ./tests/integration -count=1 -timeout 15m
   else
-    record_blocked cairn-live-integration 'legacy fixtures use the default Cairn home and counter-api; opt in only on a disposable instance with ACCEPTANCE_LIVE_CAIRN=1'
+    record_blocked cairn-live-integration 'live fixtures require ACCEPTANCE_LIVE_CAIRN=1 and explicit CAIRN_TEST_HOME pointing at a disposable instance; the CI spine executes the complete suite without skips'
   fi
 else
   record_blocked cairn-go "Mini-Docker rootfs not found at $ROOTFS; set CAIRN_ROOTFS"

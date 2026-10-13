@@ -10,7 +10,9 @@ sudo cloud-init status --wait
 sudo apt-get install --no-install-recommends -y python3-venv python3-pip iproute2 iptables
 sudo mkdir -p /opt/cairn-stack
 sudo tar -xf /home/ubuntu/source.tar -C /opt/cairn-stack
-sudo tar -xzf /home/ubuntu/go-toolchain.tgz -C /opt
+if [[ "${CAIRN_VM_INSTALL_MODE:-source}" == source ]]; then
+  sudo tar -xzf /home/ubuntu/go-toolchain.tgz -C /opt
+fi
 sudo chown -R ubuntu:ubuntu /opt/cairn-stack
 export PATH="/opt/go/bin:$PATH"
 cd /opt/cairn-stack/SERVER
@@ -29,7 +31,10 @@ PY
 else
   bash scripts/install.sh
 fi
-sudo /usr/bin/python3 -m venv /opt/cairn-stack/Mini-Docker/venv
+if [[ ! -x /opt/cairn-stack/Mini-Docker/venv/bin/python ]]; then
+  sudo /usr/bin/python3 -m venv /opt/cairn-stack/Mini-Docker/venv
+fi
+/opt/cairn-stack/Mini-Docker/venv/bin/python -c 'import sys; assert sys.prefix == "/opt/cairn-stack/Mini-Docker/venv"'
 if [[ "${CAIRN_VM_INSTALL_MODE:-source}" == verified-binaries ]]; then
   python3 - <<'PY'
 import hashlib,json
@@ -39,7 +44,7 @@ for name,digest in json.loads(Path('bin/wheel-hashes.json').read_text()).items()
     assert hashlib.file_digest(Path('bin',name).open('rb'),'sha256').hexdigest()==digest
 print('Verified locally built runtime wheel checksum')
 PY
-  sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --no-index --no-deps /opt/cairn-stack/SERVER/bin/*.whl
+  sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --force-reinstall --no-index --no-deps /opt/cairn-stack/SERVER/bin/*.whl
 else
   sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --timeout 120 --no-deps /opt/cairn-stack/Mini-Docker
 fi
@@ -57,19 +62,16 @@ sudo systemctl enable --now cairn-proof-runtime.service cairn-proof-daemon.servi
 # already-active daemon retaining its old mapped binary.
 sudo systemctl restart cairn-proof-daemon.service
 for attempt in $(seq 1 60); do
-  if /home/ubuntu/.local/bin/cairn doctor; then break; fi
+  # Doctor intentionally allows an absent cairnd before installation. The
+  # integration fixture needs its live API, not merely a usable runtime.
+  if curl --fail --silent --unix-socket /home/ubuntu/.cairn/cairnd.sock http://localhost/status > /home/ubuntu/cairn-ready.json && /home/ubuntu/.local/bin/cairn doctor; then break; fi
   sleep 1
 done
+curl --fail --silent --unix-socket /home/ubuntu/.cairn/cairnd.sock http://localhost/status > /home/ubuntu/cairn-ready.json
 /home/ubuntu/.local/bin/cairn doctor
 if [[ "${CAIRN_VM_INTEGRATION_PROOF:-0}" == 1 ]]; then
-  CAIRN_ROOTFS=/opt/cairn-stack/Mini-Docker/rootfs MINI_DOCKER_SOCKET=/run/cairn-proof/mini-docker.sock \
+  CAIRN_TEST_HOME=/home/ubuntu CAIRN_ROOTFS=/opt/cairn-stack/Mini-Docker/rootfs MINI_DOCKER_SOCKET=/run/cairn-proof/mini-docker.sock \
     bin/cairn-integration-tests -test.v -test.timeout 15m | tee /home/ubuntu/cairn-integration.log
-  python3 - <<'PY'
-from pathlib import Path
-log=Path('/home/ubuntu/cairn-integration.log').read_text()
-assert log.count('--- PASS: Test') >= 9, 'complete integration suite did not execute'
-assert '--- SKIP:' not in log, 'required integration checks were skipped'
-assert '\nPASS\n' in log, 'integration suite did not pass'
-PY
+  python3 scripts/verify_integration_log.py /home/ubuntu/cairn-integration.log
 fi
 NOTES_PROOF_PORT=8089 python3 scripts/notes_smoke.py

@@ -28,6 +28,13 @@ import (
 // Order: os.UserHomeDir (uses $HOME), then $HOME env, then t.TempDir().
 func testHome(t *testing.T) string {
 	t.Helper()
+	if explicit := os.Getenv("CAIRN_TEST_HOME"); explicit != "" {
+		absolute, err := filepath.Abs(explicit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return absolute
+	}
 	home, err := os.UserHomeDir()
 	if err == nil && home != "" {
 		return home
@@ -36,6 +43,19 @@ func testHome(t *testing.T) string {
 		return h
 	}
 	return t.TempDir()
+}
+
+// A clean disposable installation has no page left over from an earlier demo.
+// Seed the health-check target before deploying either counter fixture.
+func seedCounterPage(t *testing.T, contents string) {
+	t.Helper()
+	directory := filepath.Join(testHome(t), ".cairn", "volumes", "counter-data")
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "index.html"), []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // miniDockerInspect queries the Mini-Docker daemon inspect API over its Unix
@@ -182,6 +202,7 @@ func TestEndToEndMLP(t *testing.T) {
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		t.Skip("Cairn daemon socket does not exist. Skipping integration tests.")
 	}
+	seedCounterPage(t, "initial-counter-fixture\n")
 
 	// 2. Initialize Daemon client
 	client := cli.NewDaemonClient(socketPath)
@@ -713,6 +734,34 @@ func TestWorkersOneOffAndCron(t *testing.T) {
 	if cj.Schedule != "* * * * *" {
 		t.Errorf("expected schedule '* * * * *', got '%s'", cj.Schedule)
 	}
+	// Registration and parser behavior alone do not prove that the scheduled
+	// workload actually executes and retains its result.
+	cronExecuted := false
+	cronDeadline := time.Now().Add(100 * time.Second)
+	for time.Now().Before(cronDeadline) {
+		jobStore, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobRuns, err := jobStore.ListJobRunsByService(cronSvc.ID)
+		jobStore.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range jobRuns {
+			if run.Type == "cron" && run.Status == "success" && run.ExitCode != nil && *run.ExitCode == 0 && strings.Contains(run.Logs, "Hello from Cron Job") {
+				cronExecuted = true
+				break
+			}
+		}
+		if cronExecuted {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !cronExecuted {
+		t.Fatal("cron never recorded a successful real execution with the expected output")
+	}
 
 	// Test matches for June 22, 2026 (Monday) at 02:05:00
 	t.Log("Verifying Cron Parser matches wildcard schedules correctly...")
@@ -765,10 +814,10 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 
 	// 2. Deploy database service
 	postgresCfg := &api.ServiceConfig{
-		Name:      "integration-db",
-		Kind:      "postgres",
-		Image:     rootfs,
-		Command:   []string{"/bin/busybox", "sleep", "3600"},
+		Name:    "integration-db",
+		Kind:    "postgres",
+		Image:   rootfs,
+		Command: []string{"/bin/busybox", "sleep", "3600"},
 		Volumes: []api.VolumeConfig{
 			{Name: "integration-db-vol", MountPath: "/backup_vol"},
 		},
@@ -794,10 +843,10 @@ cat /backup_vol/restore_dump.sql > /backup_vol/restored_rows.txt
 
 	// 3. Deploy client service (uses dynamic IP resolution)
 	clientCfg := &api.ServiceConfig{
-		Name:      "client-service",
-		Kind:      "web",
-		Image:     rootfs,
-		Command:   []string{"/bin/busybox", "sleep", "3600"},
+		Name:    "client-service",
+		Kind:    "web",
+		Image:   rootfs,
+		Command: []string{"/bin/busybox", "sleep", "3600"},
 		Environment: map[string]string{
 			"DATABASE_URL": "postgres://myuser:mypassword@integration-db:5432/mydb",
 		},
@@ -942,7 +991,7 @@ func TestDashboardV1(t *testing.T) {
 
 	// 4. Verify we can fetch the dashboard assets from the TCP address
 	clientHttp := &http.Client{Timeout: 2 * time.Second}
-	
+
 	// Test redirect / -> /dashboard/
 	resp, err := clientHttp.Get("http://" + addr + "/")
 	if err != nil {
@@ -1180,18 +1229,19 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	// 2. Setup fake runtime
 	runtimeFake := newFakeRuntime()
 	runtimeFake.blockStart = true
-	
+
 	// Create context to control daemon lifecycle
 	ctx1, cancel1 := context.WithCancel(context.Background())
-	
+	defer cancel1()
+
 	// Channel to signal when to crash/cancel the first daemon instance
 	startedChan := make(chan bool, 1)
+	var interruptOnce sync.Once
 
 	// Set onStart handler to cancel the daemon's context when container is started
 	runtimeFake.onStart = func(id string) {
 		t.Logf("Fake runtime started container: %s. Crashing daemon...", id)
-		startedChan <- true
-		cancel1()
+		interruptOnce.Do(func() { startedChan <- true; cancel1() })
 	}
 
 	// Setup daemon config with a random free port for DashboardAddr
@@ -1212,19 +1262,21 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	}
 
 	srv1 := daemon.NewServer(daemonCfg, st, runtimeFake)
-	
+
 	// Start the first server in a goroutine
+	server1Done := make(chan struct{})
 	go func() {
 		_ = srv1.Start(ctx1)
+		close(server1Done)
 	}()
 
 	// Wait for server to initialize
 	time.Sleep(200 * time.Millisecond)
 
 	// Trigger deployment by calling POST /services
-	clientHttp := &http.Client{Timeout: 5 * time.Second}
+	clientHttp := &http.Client{Timeout: 60 * time.Second}
 	postData, _ := json.Marshal(cfg)
-	
+
 	t.Log("Triggering initial deployment workflow...")
 	go func() {
 		resp, err := clientHttp.Post("http://"+addr+"/services", "application/json", bytes.NewBuffer(postData))
@@ -1237,12 +1289,17 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	select {
 	case <-startedChan:
 		t.Log("Interrupted deploy workflow successfully. Waiting for daemon 1 to stop...")
-	case <-time.After(5 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("Timeout waiting for deployment workflow to start candidate container")
 	}
 
-	// Give daemon 1 a moment to shut down
-	time.Sleep(300 * time.Millisecond)
+	// Wait for actual shutdown, not a machine-speed-dependent delay. The
+	// interruption must still occur specifically inside candidate Start.
+	select {
+	case <-server1Done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("interrupted daemon did not stop its worker generation")
+	}
 
 	// Verify that workflow status in the database is still "running" (not failed/success)
 	// Query workflows
@@ -1271,16 +1328,18 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	runtimeFake2.CreateContainer(context.Background(), cfg, fmt.Sprintf("cairn-test-crash-svc-%s", wf.ID[:8]))
 
 	srv2 := daemon.NewServer(daemonCfg, st, runtimeFake2)
-	
+
 	t.Log("Starting daemon 2 to perform reconciliation...")
+	server2Done := make(chan struct{})
 	go func() {
 		_ = srv2.Start(ctx2)
+		close(server2Done)
 	}()
 
 	// Poll the database to verify the workflow is picked up, resumed, and completed successfully
 	t.Log("Polling workflow completion status...")
 	completed := false
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		wfUpdated, err := st.GetWorkflow(wf.ID)
 		if err == nil && wfUpdated != nil {
@@ -1307,6 +1366,12 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	}
 	if updatedSvc.ActualState != "running" {
 		t.Errorf("expected service actual state 'running', got '%s'", updatedSvc.ActualState)
+	}
+	cancel2()
+	select {
+	case <-server2Done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("recovered daemon did not stop before fixture store cleanup")
 	}
 }
 
@@ -1504,12 +1569,13 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		t.Skip("Cairn socket does not exist. Skipping proxy/envs integration test.")
 	}
+	seedCounterPage(t, "proxy-fixture\n")
 
 	client := cli.NewDaemonClient(socketPath)
 	ctx := context.Background()
 
 	// Load daemon config to get DashboardAddr
-	cfg, err := config.LoadDaemonConfig("")
+	cfg, err := config.LoadDaemonConfig(filepath.Join(homeDir, ".cairn", "cairnd-config.yaml"))
 	if err != nil {
 		t.Fatalf("failed to load daemon config: %v", err)
 	}
@@ -1557,6 +1623,9 @@ func TestReverseProxyAndEnvs(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected status 200 via proxy, got %d. Body: %s", resp.StatusCode, string(bodyBytes))
+	}
+	if strings.TrimSpace(string(bodyBytes)) != "proxy-fixture" {
+		t.Errorf("proxy did not serve the selected fixture bytes: %q", bodyBytes)
 	}
 
 	// 4. Test environment variables (Set, List, Masking, Delete)
@@ -1862,6 +1931,3 @@ func cleanStaleIptables(t *testing.T, ports ...int) {
 		}
 	}
 }
-
-
-
