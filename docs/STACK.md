@@ -11,7 +11,7 @@
 | **Spine** (required for MLP) | **Cairn → Mini-Docker → DuraFlow** | Single-node deploy, recoverability, backups, events |
 | **Lab** (portfolio-adjacent) | **FailForge**, **MiniDB** (Mini-Redis-Cassandra), **Coordination-service** | Local chaos / experimental systems targets; **not** required to close A |
 
-FailForge continuous Cairn CI is **OUT of Closeout A** (optional lab). See [roadmap.md](roadmap.md).
+This document uses the historical Closeout A name for Cairn's deployment spine. The later six-project acceptance record separately covers all six repositories. FailForge has its own required first-party campaign CI; it is not a Cairn production dependency. See [the October validation record](VALIDATION_2026-10.md).
 
 ```text
                     Clients / CLI
@@ -127,7 +127,7 @@ KILL_SIGNAL=SIGKILL ./scripts/mid_deploy_crash_demo.sh
 N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh  # unit + bash -n (CI-shaped; no Mini-Docker)
 ```
 
-GitHub Actions: **unit + build + bash -n only**. Full Track A needs local Mini-Docker + DURAFLOW.
+GitHub Actions now runs core/build/source-installer checks plus a privileged job covering the real stateful spine, all nine named integration workflows and actual database recovery. Browser controls, guest reboot/abrupt shutdown and elapsed-time soaks have separately retained evidence. Local live proofs still require Mini-Docker + DURAFLOW.
 
 ### Track B — FailForge MiniDB (lab, not Closeout A)
 
@@ -135,7 +135,7 @@ GitHub Actions: **unit + build + bash -n only**. Full Track A needs local Mini-D
 cd FAILFORGE
 go build -o bin/failforge ./cmd/failforge
 ./bin/failforge run failforge_minidb.yml --seed 42
-./bin/failforge report runs/minidb-42
+./bin/failforge report "<output-directory-printed-by-run>"
 ```
 
 ### Track C — FailForge Coordination (lab, not Closeout A)
@@ -144,7 +144,7 @@ go build -o bin/failforge ./cmd/failforge
 cd FAILFORGE
 go build -o bin/failforge ./cmd/failforge
 ./bin/failforge run failforge_coordination.yml --seed 42
-./bin/failforge report runs/coordination-42
+./bin/failforge report "<output-directory-printed-by-run>"
 ```
 
 ---
@@ -155,8 +155,8 @@ go build -o bin/failforge ./cmd/failforge
 - Rune / SETU product work  
 - Dashboard redesign  
 - MiniDB as Cairn production store  
-- Continuous GitHub FailForge / Cairn live matrix (local lab only; **OUT of A**)  
-- Chasing “seed 42 always 0 ERROR” on MiniDB unless explicitly prioritized  
+- Broader FailForge / Cairn fault matrices beyond the required first-party campaigns
+- Treating any selected seed as a universal correctness proof
 
 ---
 

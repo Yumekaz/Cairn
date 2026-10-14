@@ -1,294 +1,207 @@
-# 🏔️ Cairn
+# Cairn
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.26.x-blue.svg)](https://golang.org)
-[![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
+[![CI](https://github.com/Yumekaz/Cairn/actions/workflows/smoke.yml/badge.svg)](https://github.com/Yumekaz/Cairn/actions/workflows/smoke.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Cairn is a CLI-first, **single-node** Linux PaaS: deploy stateful services on **Mini-Docker**, durable deploys via **DuraFlow**, volumes/backups, reverse proxy, and a recoverability story when `cairnd` dies mid-deploy.
+**A stateful-first, single-node Linux PaaS for deploying services, preserving data and recovering interrupted deployments.**
 
-Deployment scope is one Linux host. **Cairn + Mini-Docker + DuraFlow** form the deployment stack; FailForge, MiniDB and Coordination provide connected verification/reference work, rather than required production dependencies. See [docs/STACK.md](docs/STACK.md).
+Cairn combines a CLI and local dashboard with persistent volumes, backups, HTTP routing, workers and cron jobs. Mini-Docker provides the container runtime; DuraFlow persists deployment, backup and restore workflows. The deployment stack does not require Kubernetes, Docker or containerd.
 
-## Acceptance evidence
+## What you can do
 
-The [October 2026 validation record](docs/VALIDATION_2026-10.md) records the completed bounded acceptance gates, retained failed attempts and remaining scope limitations. Run `bash scripts/acceptance_suite.sh` for bounded, retained six-repository results; add `ACCEPTANCE_DATABASES=1` for real private PostgreSQL, Redis and MongoDB driver checks plus DuraFlow PostgreSQL leases. Each run saves commit IDs, dirty-tree patches, untracked source archives and individual logs. Root runtime proofs, live browser controls, VM recovery and elapsed-time soak evidence are separate gates, not inferred from unit tests.
-
-The dashboard is a local admin interface: its TCP listener rejects cross-origin browser requests and unexpected Host headers. This is not authentication or an audited hostile-tenant isolation guarantee. Keep it local; a public deployment needs a separately secured access layer. PostgreSQL logical restores replace objects included in the snapshot and stop on errors transactionally; unrelated objects created later are not automatically removed. MongoDB logical restores are not globally atomic across collections.
-
----
-
-## Get running
-
-One path from zero (or a Cairn-only clone) to siblings + install + init + doctor:
-
-```bash
-git clone https://github.com/Yumekaz/Cairn.git
-cd Cairn
-./scripts/bootstrap_stack.sh --start-runtime   # needs sudo for Mini-Docker
-cairn doctor
-./scripts/prove_mlp.sh   # optional full proof
-```
-
-From an empty parent (clones all three siblings):
-
-```bash
-# after obtaining bootstrap_stack.sh (e.g. from a Cairn clone)
-./scripts/bootstrap_stack.sh --parent ~/src/cairn-stack --start-runtime
-```
-
-**Privileges / prerequisites**
-
-* **Linux only** (namespaces, OverlayFS, host-managed networking)
-* **sudo/root** to start Mini-Docker (passwordless `sudo -n`, or non-interactive `SUDO_PASSWORD` in the local shell — never commit passwords)
-* **Go 1.26+** (see `go.mod`) and **Python 3.10+**
-* Without privilege: run `./scripts/bootstrap_stack.sh` (no `--start-runtime`) — build/install still succeed; start Mini-Docker manually later
-
-See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) and [docs/quickstart.md](docs/quickstart.md).
-
----
-
-## Reliability claim (single-node MLP)
-
-**On one Linux host, Cairn deploys a stateful service on Mini-Docker, keeps a healthy release serving if a candidate fails or `cairnd` is killed mid-deploy, and you can re-run that proof locally.**
-
-DuraFlow resumes unfinished work; failed candidates do not steal `current_deploy_id`; traffic stays on the last healthy release.
-
-Migration exception: if execution may have started but completion was not durably
-recorded, Cairn blocks automatic replay and requires operator inspection. Failed
-and interrupted migrations also block unsafe rollback. Preserving the old route
-does not establish database compatibility; see [migration safety and recovery](docs/MIGRATION_SAFETY.md).
-
-### Prove it (one command)
-
-Sibling checkouts of **Cairn**, **DURAFLOW**, and **Mini-Docker** are required. Live proofs need **privileged Mini-Docker** (sudo/root for daemon + networking). Set env (or let `scripts/lib/runtime.sh` discover rootfs):
-
-```bash
-export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
-export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
-export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
-
-# Closeout A — single-node MLP proof (primary)
-./scripts/prove_mlp.sh
-# or: make prove
-```
-
-That runs units + clean deploy story + mid-deploy crash + rollback safety + failure matrix F1–F6 (including hard F5 backup interrupt).  
-Other scripts: `clean_demo.sh`, `failure_matrix.sh`, `stability_gate.sh`, `cold_clone_verify.sh`, `prove_portability.sh`, `demo_reset.sh`.  
-Unit/syntax only (no Mini-Docker): `N=1 SKIP_LIVE=1 ./scripts/stability_gate.sh` or `make smoke`.  
-Same-machine Portability A proof (clean `/tmp` sibling tree, no Desktop): `./scripts/prove_portability.sh` — see [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md).
-
-### What GitHub Actions runs
-
-The required [smoke workflow](.github/workflows/smoke.yml) checks locked DuraFlow/Mini-Docker revisions, core tests, binary builds, clean Linux source installation, shell syntax, verification-runner regressions and dashboard focus regressions. Its privileged job runs the real stateful deployment/recovery spine, all nine named integration workflows without skips, and actual PostgreSQL/Redis/MongoDB backup/restore drivers. Artifacts are retained even on failure.
-
-Live browser controls, guest reboot/abrupt shutdown and the two independent two-hour soak sessions retain separate acceptance evidence. FailForge's repository independently requires its covered MiniDB/Coordination fault campaigns; those projects are not Cairn production dependencies.
-
-### Postmortems
-
-| Topic | Doc |
+| Capability | Behavior |
 | --- | --- |
-| Failed deploy left wrong `current_deploy_id` | [docs/postmortems/2026-07-failed-deploy-metadata.md](docs/postmortems/2026-07-failed-deploy-metadata.md) |
-| Mid-deploy `cairnd` kill + recovery | [docs/postmortems/2026-07-mid-deploy-crash-recovery.md](docs/postmortems/2026-07-mid-deploy-crash-recovery.md) |
+| Deploy web services | Start a candidate, check its health, then switch the active route |
+| Preserve application data | Mount named host-backed volumes across releases and restarts |
+| Back up and restore | Volume archives plus PostgreSQL, Redis and MongoDB recovery drivers |
+| Recover controller crashes | Resume durable work while checking actual runtime state |
+| Run background work | Long-running workers, one-off commands and cron schedules |
+| Inspect operations | Service state, logs, deployment history, backups and audit events |
+| Manage configuration | Environment variables and AES-GCM-encrypted secrets using a local key file |
 
-Closeout criteria: [docs/CLOSEOUT_A.md](docs/CLOSEOUT_A.md) · Portability A: [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md) · Architecture design: [docs/design/CAIRN_SINGLE_NODE.md](docs/design/CAIRN_SINGLE_NODE.md) · [docs/roadmap.md](docs/roadmap.md).
+The supported deployment scope is **one Linux host with controlled workloads**. Cairn is not a multi-host scheduler or an independently audited hostile-tenant platform.
 
----
+## Quick start
 
-## 🏗️ Architecture & Request Flow
+Requirements: Linux, Go **1.26.4 or a compatible newer toolchain**, Python **3.10+**, and sudo/root for full Mini-Docker networking and namespace operations. The bootstrap prepares the sibling repositories and runtime prerequisites.
 
-The following diagram illustrates how incoming client requests map to isolated container instances via Cairn's integrated virtual-host reverse proxy:
-
-```mermaid
-graph TD
-    Client[Client Request] -->|Host: app.localhost| Proxy[Cairn Reverse Proxy Router]
-    Proxy -->|1. Lookup metadata| SQLite[(SQLite State Store)]
-    Proxy -->|2. Get container info| Runtime[Runtime Backend Adapter]
-    Runtime -->|3. Query state| Socket(Mini-Docker Socket)
-    Proxy -->|4. Forward traffic| Container[Isolated Container: 10.0.0.x:port]
-    
-    style Proxy fill:#4F46E5,stroke:#312E81,stroke-width:2px,color:#fff
-    style SQLite fill:#059669,stroke:#064E3B,stroke-width:2px,color:#fff
-    style Container fill:#06B6D4,stroke:#0891B2,stroke-width:2px,color:#fff
-```
-
----
-
-## 🔄 Deployment Lifecycle (DuraFlow Workflow)
-
-Every service deployment or modification is executed as a multi-step workflow. If the candidate service fails health checks, Cairn automatically rolls back to the previous healthy deployment:
-
-```mermaid
-graph TD
-    Start[Deploy Request] --> Validate[1. Validate Config]
-    Validate --> Build[2. Save Config & Prepare Dir]
-    Build --> Migrate{3. Database Migration?}
-    Migrate -->|Yes| RunMigration[Execute Migration Script]
-    Migrate -->|No| Create[4. Create Candidate Container]
-    RunMigration --> Create
-    Create --> StartCandidate[5. Start Candidate Container]
-    StartCandidate --> HealthCheck{6. Health Check Passes?}
-    
-    HealthCheck -->|Yes| RouteTraffic[7. Update Proxy Routing]
-    RouteTraffic --> Cleanup[8. Terminate & Remove Old Container]
-    Cleanup --> Done[Deploy Completed]
-    
-    HealthCheck -->|No| KeepRoute[7. Preserve Active Route to v1]
-    KeepRoute --> Rollback[8. Terminate Candidate & Rollback]
-    Rollback --> Failed[Deploy Failed]
-
-    style RouteTraffic fill:#059669,stroke:#064E3B,stroke-width:2px,color:#fff
-    style Rollback fill:#DC2626,stroke:#7F1D1D,stroke-width:2px,color:#fff
-```
-
----
-
-## 🛠️ Key Capabilities
-
-* **Virtual-Host Reverse Proxy**: Built-in HTTP multiplexer mapping subdomains (e.g., `*.localhost`) to container bridge IPs. Automatically serves an operational custom fallback page if a service goes down.
-* **Hardware-Secured Secrets**: Encrypts sensitive environment variables on the host filesystem using **AES-GCM** encryption keyed against local system keys. 
-* **Stateful Database Drivers**: Native logical backup and restore flows for PostgreSQL, Redis, and MongoDB, replacing generic volume tarballs with true database snapshots.
-* **Transactional Deployment Workflows**: Core state mutations run on the durable **DuraFlow** workflow engine, preventing corrupted configurations and orchestrating zero-downtime rollbacks.
-* **Task Scheduling**: Integrated daemon-managed cron scheduler and headless background workers.
-* **Web Monitoring Console**: Low-footprint web interface displaying real-time metrics, system events, service status, and deployment history logs.
-
----
-
-## 🚀 Quickstart Installation
-
-**Preferred:** [Get running](#get-running) via `./scripts/bootstrap_stack.sh` (clones siblings, install, init, optional runtime).
-
-**Sibling layout** (DuraFlow is a local module replace, not a published version pin):
-
-```text
-parent/
-  Cairn/          # this repo (or SERVER checkout)
-  DURAFLOW/       # https://github.com/Yumekaz/DURAFLOW.git
-  Mini-Docker/    # https://github.com/Yumekaz/Mini-Docker.git
-```
-
-Go `1.26.x` (see `go.mod`), Python `3.10+`, OverlayFS. Mini-Docker daemon needs root (or carefully configured rootless).
-
-### Manual path (advanced)
-
-#### 1. Clone siblings + install
 ```bash
-mkdir -p ~/src && cd ~/src
 git clone https://github.com/Yumekaz/Cairn.git
-git clone https://github.com/Yumekaz/DURAFLOW.git
-git clone https://github.com/Yumekaz/Mini-Docker.git
 cd Cairn
-./scripts/install.sh
-```
-
-#### 2. Runtime env
-```bash
-export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
-export MINI_DOCKER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/mini-docker/mini-docker.sock"
-export PYTHONPATH="$(pwd)/../Mini-Docker${PYTHONPATH:+:$PYTHONPATH}"
-```
-
-#### 3. Start Mini-Docker (single daemon)
-```bash
-sudo mkdir -p "$(dirname "$MINI_DOCKER_SOCKET")"
-sudo env PYTHONPATH="$PYTHONPATH" python3 -m mini_docker daemon \
-  --socket "$MINI_DOCKER_SOCKET" \
-  --socket-mode 660
-# In a second terminal, after the daemon has created the socket:
-sudo chown "$(id -u):$(id -g)" "$MINI_DOCKER_SOCKET"
-```
-
-### 4. Init + doctor + demo
-```bash
-cairn init
+./scripts/bootstrap_stack.sh --start-runtime
+export PATH="$HOME/.local/bin:$PATH"
 cairn doctor
 ./scripts/clean_demo.sh
 ```
 
-### Private cold-clone / portability self-check (no friends required)
-From a Cairn checkout you already trust:
+The dashboard is available at **http://127.0.0.1:2476/dashboard/**. Keep it local: Host/origin protections are not authentication or TLS.
+
+Build-only setup is available without privilege:
+
 ```bash
-./scripts/prove_portability.sh   # Portability A: clean tree under /tmp, no Desktop
-./scripts/cold_clone_verify.sh   # optional: fresh git clones + clean_demo
+./scripts/bootstrap_stack.sh
 ```
 
-See [docs/PORTABILITY_A.md](docs/PORTABILITY_A.md), [docs/quickstart.md](docs/quickstart.md), and [docs/postmortems/](docs/postmortems/).
+For manual installation, runtime startup and configuration, see [Getting started](docs/GETTING_STARTED.md) and [Quickstart](docs/quickstart.md). Bootstrap starts a local runtime; it is not a claim that permanent boot-enabled services have been installed.
 
----
+The Go module uses a sibling DuraFlow checkout:
 
-## 📖 Declarative Specification (`cairn.yaml`)
+```text
+parent/
+  Cairn/
+  DURAFLOW/
+  Mini-Docker/
+```
 
-Services are defined using a structured configuration file:
+## Architecture
+
+DuraFlow is embedded in Cairn's control plane; Mini-Docker is accessed through its Unix-socket API.
+
+```mermaid
+flowchart LR
+    CLI["Cairn CLI"] --> Daemon["cairnd"]
+    UI["Local dashboard"] --> Daemon
+    Daemon --> Workflow["DuraFlow durable workflows"]
+    Daemon --> State[("SQLite control-plane state")]
+    Workflow --> State
+    Daemon --> Runtime["Mini-Docker Unix-socket API"]
+    Runtime --> App["Application containers"]
+    App --> Data[("Named persistent volumes")]
+```
+
+Application requests use the active service's runtime identity and container address:
+
+```mermaid
+flowchart LR
+    Client["HTTP request: app.localhost"] --> Proxy["Cairn reverse proxy"]
+    Proxy --> Metadata[("Service and active-release metadata")]
+    Proxy --> Inspect["Inspect runtime through Mini-Docker"]
+    Inspect --> Container["Container IP and port"]
+    Proxy --> Container
+```
+
+## Deployment and migration safety
+
+For an existing service, the old route remains active until the candidate passes health checks. A failed candidate is cleaned up; **preserving an old route is not database rollback**.
+
+```mermaid
+flowchart TD
+    Request["Deployment request"] --> Validate["Validate and save configuration"]
+    Validate --> Migration{"Migration configured?"}
+    Migration -->|No| Create["Create or recover candidate"]
+    Migration -->|Yes| Backup["Back up existing attached volumes"]
+    Backup --> Guard{"Migration step already marked as possibly modifying state?"}
+    Guard -->|Yes| Inspect["Block automatic replay; require operator inspection"]
+    Guard -->|No| Mark["Persist state_touched before execution"]
+    Mark --> Run["Run migration task"]
+    Run -->|Success| Create
+    Run -->|Failure or uncertain outcome| Inspect
+    Create --> Start["Start or recognize running candidate"]
+    Start --> Health{"Health check passes?"}
+    Health -->|Yes| Route["Commit new route and clean up old container"]
+    Health -->|No| Failed["Fail deployment; clean up candidate; preserve previous route if present"]
+```
+
+Failed and interrupted migrations can block rollback to an older release. A forced rollback bypasses that guard; it does not undo migration writes or prove schema compatibility. Inspect the task and data before deciding whether to restore, finish a migration or deploy a compatible application.
+
+See [Migration safety and recovery](docs/MIGRATION_SAFETY.md).
+
+## Service configuration
+
+Cairn uses a local rootfs path, not an automatic container-registry image pull. Set the rootfs location before deploying:
+
+```bash
+export CAIRN_ROOTFS="$(pwd)/../Mini-Docker/rootfs"
+```
+
+Save this example as `cairn.yaml`. It starts BusyBox HTTP and initializes a small page in a persistent volume:
 
 ```yaml
 name: web-api
 kind: web
-
-runtime:
-  backend: minidocker
-  image_or_rootfs: "python:3.10-alpine"
-  command: ["python", "app.py"]
-
-environment:
-  API_PORT: "8000"
-
+image: ${CAIRN_ROOTFS}
+command:
+  - /bin/sh
+  - -c
+  - "printf 'Cairn is running\\n' > /www/index.html; exec /bin/busybox httpd -f -p 80 -h /www"
+ports:
+  - host: 8080
+    container: 80
 volumes:
-  - name: storage-volume
-    mount: /app/data
-
+  - name: web-data
+    mount_path: /www
 healthcheck:
-  type: http
-  path: /healthz
-  interval: 5s
-  timeout: 2s
+  http_path: /index.html
+  interval: 2s
+  timeout: 1s
   retries: 3
-  startup_grace: 10s
-
+  startup_grace: 1s
 restart:
-  policy: always
+  policy: on-failure
+  max_retries: 3
 ```
 
----
-
-## 💻 CLI Reference
-
-### Deployments & Process Control
 ```bash
-# Deploy a service configuration
-cairn deploy ./path/to/cairn.yaml
+cairn deploy ./cairn.yaml
+curl -H 'Host: web-api.localhost' http://127.0.0.1:2476/index.html
+```
 
-# View active workloads
+The page initialization is a demonstration, not an application migration strategy. See the [notes](examples/notes), [worker](examples/worker) and [cron](examples/cron-job) examples for other workload types.
+
+## Everyday commands
+
+```bash
 cairn ps
+cairn logs web-api
+cairn stop web-api
+cairn start web-api
+cairn restart web-api
 
-# Control service state
-cairn stop <service-name>
-cairn restart <service-name>
+cairn env set web-api APP_MODE=development
+cairn env list web-api
+cairn secret --help
+
+cairn backup create web-data
+cairn backup list web-data
+cairn restore web-data "<backup-id>"
+cairn recovery web-api
 ```
 
-### Secrets & Variables
+Replace "<backup-id>" with an ID from the backup list. Environment and secret updates redeploy the service. Secret values are encrypted with a permission-protected local host key; this is **not TPM/HSM-backed encryption**. The current secret CLI accepts values as arguments, so consider shell history and process-argument exposure when using it.
+
+## Verification
+
+The [required CI workflow](.github/workflows/smoke.yml) builds locked stack revisions and runs:
+
+- Core tests, binary builds and clean Linux source installation.
+- Shell syntax, verification-runner and dashboard focus regressions.
+- Real privileged deployment/recovery and all nine named integration workflows without prerequisite skips.
+- Actual PostgreSQL, Redis and MongoDB backup/restore drivers, plus DuraFlow PostgreSQL tests.
+
+The [October validation record](docs/VALIDATION_2026-10.md) separately records live dashboard/data checks, bounded disk-full testing, guest installation/reboot/abrupt shutdown and two independent two-hour soaks. Those sessions do not establish an uninterrupted 24-hour result.
+
 ```bash
-# Set a configuration environment variable
-cairn env set <service-name> KEY value
-
-# Set a hardware-encrypted configuration secret
-cairn secret set <service-name> API_KEY value
-
-# List configuration keys (values for secrets are masked)
-cairn env list <service-name>
+bash scripts/acceptance_suite.sh
+ACCEPTANCE_DATABASES=1 bash scripts/acceptance_suite.sh
+./scripts/prove_mlp.sh
 ```
 
-### Volumes & Backups
-```bash
-# Create a volume snapshot
-cairn backup create <volume-name>
+The six-repository acceptance runner expects sibling checkouts. It retains commands, revisions, patches, exit codes and logs; unavailable prerequisites remain non-green. Live proofs require privileged Mini-Docker. Use dedicated fixtures rather than an existing production deployment.
 
-# List backup snapshots
-cairn backup list <volume-name>
+## Scope and limits
 
-# Revert a volume state to a specific snapshot
-cairn restore <volume-name> <backup-id>
-```
+- Migration guards are not an atomic migration protocol or automatic database undo.
+- PostgreSQL restores replace objects in the selected dump, not unrelated later-created objects; MongoDB restores are not globally atomic across collections.
+- Dashboard Connected means API reachability, not whole-stack health.
+- The local admin interface requires a separately secured access layer before public exposure.
+- Runtime isolation, exhaustive fault schedules and physical storage/power failures are not universally certified by the retained checks.
 
----
+## Documentation and related projects
 
-## 📄 License
+[Architecture](docs/architecture.md) · [Recovery](docs/MIGRATION_SAFETY.md) · [Validation](docs/VALIDATION_2026-10.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-Distributed under the MIT License. See [LICENSE](LICENSE) for more details.
+[Mini-Docker](https://github.com/Yumekaz/Mini-Docker) and [DuraFlow](https://github.com/Yumekaz/DURAFLOW) are the deployment dependencies. [FailForge](https://github.com/Yumekaz/FAILFORGE), [MiniDB](https://github.com/Yumekaz/Mini-Redis-Cassandra) and [Coordination-service](https://github.com/Yumekaz/Coordination-service) are connected verification/reference projects, not Cairn's production metadata store.
+
+## License
+
+[MIT](LICENSE).
