@@ -10,7 +10,7 @@ Deployment scope is one Linux host. **Cairn + Mini-Docker + DuraFlow** form the 
 
 ## Acceptance evidence
 
-The [October 2026 validation record](docs/VALIDATION_2026-10.md) tracks actual passes, failures and pending gates. Run `bash scripts/acceptance_suite.sh` for bounded, retained six-repository results; add `ACCEPTANCE_DATABASES=1` for real private PostgreSQL, Redis and MongoDB driver checks plus DuraFlow PostgreSQL leases. Each run saves commit IDs, dirty-tree patches, untracked source archives and individual logs. Root runtime proofs, live browser controls, VM recovery and elapsed-time soak evidence are separate gates, not inferred from unit tests.
+The [October 2026 validation record](docs/VALIDATION_2026-10.md) records the completed bounded acceptance gates, retained failed attempts and remaining scope limitations. Run `bash scripts/acceptance_suite.sh` for bounded, retained six-repository results; add `ACCEPTANCE_DATABASES=1` for real private PostgreSQL, Redis and MongoDB driver checks plus DuraFlow PostgreSQL leases. Each run saves commit IDs, dirty-tree patches, untracked source archives and individual logs. Root runtime proofs, live browser controls, VM recovery and elapsed-time soak evidence are separate gates, not inferred from unit tests.
 
 The dashboard is a local admin interface: its TCP listener rejects cross-origin browser requests and unexpected Host headers. This is not authentication or an audited hostile-tenant isolation guarantee. Keep it local; a public deployment needs a separately secured access layer. PostgreSQL logical restores replace objects included in the snapshot and stop on errors transactionally; unrelated objects created later are not automatically removed. MongoDB logical restores are not globally atomic across collections.
 
@@ -78,8 +78,9 @@ Same-machine Portability A proof (clean `/tmp` sibling tree, no Desktop): `./scr
 
 ### What GitHub Actions runs
 
-**Unit tests + binary build + `bash -n` on `scripts/*.sh` only** (`.github/workflows/smoke.yml`).  
-Full proofs need **local Linux + privileged Mini-Docker + DURAFLOW sibling**. FailForge continuous CI is **out of Closeout A** (optional lab only).
+The required [smoke workflow](.github/workflows/smoke.yml) checks locked DuraFlow/Mini-Docker revisions, core tests, binary builds, clean Linux source installation, shell syntax, verification-runner regressions and dashboard focus regressions. Its privileged job runs the real stateful deployment/recovery spine, all nine named integration workflows without skips, and actual PostgreSQL/Redis/MongoDB backup/restore drivers. Artifacts are retained even on failure.
+
+Live browser controls, guest reboot/abrupt shutdown and the two independent two-hour soak sessions retain separate acceptance evidence. FailForge's repository independently requires its covered MiniDB/Coordination fault campaigns; those projects are not Cairn production dependencies.
 
 ### Postmortems
 
