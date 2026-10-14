@@ -3,10 +3,44 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/yumekaz/cairn/internal/api"
 )
+
+// IsActiveJobContainer recognizes only exact task names backed by a live job
+// record. Query at the cleanup decision, after listing runtime containers:
+// the scheduler records the job before exposing its task to the runtime.
+func (s *Store) IsActiveJobContainer(name string) (bool, error) {
+	rows, err := s.db.Query(`SELECT j.id, j.type, s.name FROM jobs j JOIN services s ON s.id = j.service_id WHERE j.status = 'running'`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, kind, serviceName string
+		if err := rows.Scan(&id, &kind, &serviceName); err != nil {
+			return false, err
+		}
+		if len(id) < 8 {
+			continue
+		}
+		var suffix string
+		switch kind {
+		case "cron":
+			suffix = "cron"
+		case "one-off":
+			suffix = "oneoff"
+		default:
+			continue
+		}
+		if name == fmt.Sprintf("cairn-%s-%s-%s", serviceName, suffix, id[:8]) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
 
 // CreateJobRun creates a new job run record.
 func (s *Store) CreateJobRun(jr *api.JobRun) error {

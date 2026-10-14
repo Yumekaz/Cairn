@@ -440,6 +440,14 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 					}
 				}
 				if !isRegistered {
+					activeJob, jobErr := s.store.IsActiveJobContainer(nameClean)
+					if jobErr != nil {
+						log.Printf("cairnd: cannot verify job ownership for %s; leaving runtime intact: %v", nameClean, jobErr)
+						continue
+					}
+					if activeJob {
+						continue
+					}
 					// Check active deployments in SQLite to verify it's not a currently creating deployment candidate or migration task
 					activeDeploys, err := s.store.ListActiveDeployIDs()
 					isActiveDeploy := false
