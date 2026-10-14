@@ -410,10 +410,27 @@ func (s *Server) execDeployStartContainer(ctx *duraflow.StepContext) error {
 	if candidateID == "" {
 		candidateID = fmt.Sprintf("cairn-%s-%s", svc.Name, deploy.ID[:8])
 	}
+	// The runtime may have started the candidate before the controller lost
+	// its acknowledgement or persisted StepSucceeded. A real runtime rejects
+	// Start on an already-running container; recovery must observe it instead
+	// of deleting the healthy candidate and failing the resumed deployment.
+	if info, err := s.runtime.InspectContainer(ctx.Context, candidateID); err == nil && info != nil && info.State == runtime.StateRunning {
+		if info.ID != "" {
+			ctx.State["candidate_id"] = info.ID
+		}
+		return nil
+	}
 
 	if err := s.runtime.StartContainer(ctx.Context, candidateID); err != nil {
 		if isWorkflowInterrupted(err) {
 			return err
+		}
+		// Cover a concurrent completed Start between inspection and request.
+		if info, inspectErr := s.runtime.InspectContainer(ctx.Context, candidateID); inspectErr == nil && info != nil && info.State == runtime.StateRunning {
+			if info.ID != "" {
+				ctx.State["candidate_id"] = info.ID
+			}
+			return nil
 		}
 		s.runtime.RemoveContainer(ctx.Context, candidateID)
 		s.failDeploy(deploy, svc, "Failed to start container: "+err.Error())

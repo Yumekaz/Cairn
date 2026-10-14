@@ -986,11 +986,28 @@ func TestDashboardV1(t *testing.T) {
 		}
 	}()
 
-	// Wait for server to start
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the actual API rather than guessing initialization time. TCG
+	// guest execution is much slower than a native runner; a short sleep and
+	// two-second client deadline do not establish readiness.
+	clientHttp := &http.Client{Timeout: 10 * time.Second}
+	ready := false
+	readyDeadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(readyDeadline) {
+		response, err := clientHttp.Get("http://" + addr + "/status")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("dashboard API never became ready")
+	}
 
-	// 4. Verify we can fetch the dashboard assets from the TCP address
-	clientHttp := &http.Client{Timeout: 2 * time.Second}
+	// 4. Verify the actual redirect, dashboard assets and deployment API.
 
 	// Test redirect / -> /dashboard/
 	resp, err := clientHttp.Get("http://" + addr + "/")
@@ -1106,9 +1123,24 @@ func (f *fakeRuntime) CreateContainer(ctx context.Context, cfg *api.ServiceConfi
 
 func (f *fakeRuntime) StartContainer(ctx context.Context, id string) error {
 	f.mu.Lock()
-	if c, ok := f.containers[id]; ok {
-		c.State = runtime.StateRunning
+	c := f.containers[id]
+	if c == nil {
+		for _, candidate := range f.containers {
+			if candidate.Name == id {
+				c = candidate
+				break
+			}
+		}
 	}
+	if c == nil {
+		f.mu.Unlock()
+		return fmt.Errorf("container not found: %s", id)
+	}
+	if c.State == runtime.StateRunning {
+		f.mu.Unlock()
+		return fmt.Errorf("container already running: %s", id)
+	}
+	c.State = runtime.StateRunning
 	f.mu.Unlock()
 
 	if f.onStart != nil {
@@ -1146,7 +1178,17 @@ func (f *fakeRuntime) InspectContainer(ctx context.Context, id string) (*runtime
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c, ok := f.containers[id]; ok {
-		return c, nil
+		copy := *c
+		return &copy, nil
+	}
+	// The real runtime supports exact names as well as canonical IDs. Crash
+	// recovery intentionally inspects a deterministic candidate name when its
+	// process-local candidate-ID map is gone.
+	for _, c := range f.containers {
+		if c.Name == id {
+			copy := *c
+			return &copy, nil
+		}
 	}
 	return nil, fmt.Errorf("container not found: %s", id)
 }
@@ -1160,7 +1202,8 @@ func (f *fakeRuntime) ListContainers(ctx context.Context) ([]*runtime.ContainerI
 	defer f.mu.Unlock()
 	var list []*runtime.ContainerInfo
 	for _, c := range f.containers {
-		list = append(list, c)
+		copy := *c
+		list = append(list, &copy)
 	}
 	return list, nil
 }
@@ -1276,10 +1319,15 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	// Trigger deployment by calling POST /services
 	clientHttp := &http.Client{Timeout: 60 * time.Second}
 	postData, _ := json.Marshal(cfg)
+	request, err := http.NewRequestWithContext(ctx1, "POST", "http://"+addr+"/services", bytes.NewBuffer(postData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
 
 	t.Log("Triggering initial deployment workflow...")
 	go func() {
-		resp, err := clientHttp.Post("http://"+addr+"/services", "application/json", bytes.NewBuffer(postData))
+		resp, err := clientHttp.Do(request)
 		if err == nil {
 			resp.Body.Close()
 		}
@@ -1324,8 +1372,14 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	// allowing the resumed workflow to complete.
 	runtimeFake2 := newFakeRuntime()
 	runtimeFake2.blockStart = false
-	// Re-add container info so the inspect works on resumed run
-	runtimeFake2.CreateContainer(context.Background(), cfg, fmt.Sprintf("cairn-test-crash-svc-%s", wf.ID[:8]))
+	// The runtime survives the controller interruption. Preserve its actual
+	// candidate identity, not a made-up workflow-ID-based container name.
+	runtimeFake.mu.Lock()
+	for id, info := range runtimeFake.containers {
+		copy := *info
+		runtimeFake2.containers[id] = &copy
+	}
+	runtimeFake.mu.Unlock()
 
 	srv2 := daemon.NewServer(daemonCfg, st, runtimeFake2)
 
@@ -1366,6 +1420,10 @@ func TestDuraFlowCrashRecovery(t *testing.T) {
 	}
 	if updatedSvc.ActualState != "running" {
 		t.Errorf("expected service actual state 'running', got '%s'", updatedSvc.ActualState)
+	}
+	info, err := runtimeFake2.InspectContainer(context.Background(), updatedSvc.RuntimeID)
+	if err != nil || info.State != runtime.StateRunning {
+		t.Fatalf("recovery claimed running without the actual candidate: %+v %v", info, err)
 	}
 	cancel2()
 	select {
