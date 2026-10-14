@@ -9,7 +9,9 @@ case "$REQUEST_METHOD" in
     trap 'rmdir /data/write.lock' EXIT
     if ! dd bs=1 count="$CONTENT_LENGTH" >> /data/notes.txt 2>/dev/null; then printf 'Status: 500 Write Failed\r\n\r\n'; exit 0; fi
     printf '\n' >> /data/notes.txt
-    sync
+    # Flush this journal and its directory entry, not every host filesystem.
+    # A failed flush is an indeterminate write, never a successful durable ACK.
+    if ! sync /data/notes.txt /data; then printf 'Status: 500 Sync Failed\r\n\r\n'; exit 0; fi
     printf 'Status: 201 Created\r\nContent-Type: text/plain\r\n\r\nSaved\n' ;;
   *) printf 'Status: 405 Method Not Allowed\r\n\r\n' ;;
 esac
