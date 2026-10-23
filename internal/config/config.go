@@ -13,13 +13,17 @@ import (
 
 // DaemonConfig holds configuration settings for the cairnd daemon.
 type DaemonConfig struct {
-	SocketPath       string `yaml:"socket_path"`
-	DatabasePath     string `yaml:"database_path"`
-	DataDir          string `yaml:"data_dir"`
-	VolumeDir        string `yaml:"volume_dir"`
-	BackupDir        string `yaml:"backup_dir"`
-	MiniDockerSocket string `yaml:"mini_docker_socket"`
-	DashboardAddr    string `yaml:"dashboard_addr"`
+	SocketPath       string   `yaml:"socket_path" json:"socket_path"`
+	DatabasePath     string   `yaml:"database_path" json:"database_path"`
+	DataDir          string   `yaml:"data_dir" json:"data_dir"`
+	VolumeDir        string   `yaml:"volume_dir" json:"volume_dir"`
+	BackupDir        string   `yaml:"backup_dir" json:"backup_dir"`
+	MiniDockerSocket string   `yaml:"mini_docker_socket" json:"mini_docker_socket"`
+	DashboardAddr    string   `yaml:"dashboard_addr" json:"dashboard_addr"`
+	AdminTokenFile   string   `yaml:"admin_token_file,omitempty" json:"admin_token_file,omitempty"`
+	DashboardTLSCert string   `yaml:"dashboard_tls_cert,omitempty" json:"dashboard_tls_cert,omitempty"`
+	DashboardTLSKey  string   `yaml:"dashboard_tls_key,omitempty" json:"dashboard_tls_key,omitempty"`
+	DashboardHosts   []string `yaml:"dashboard_hosts,omitempty" json:"dashboard_hosts,omitempty"`
 }
 
 // DefaultConfig returns the default configuration based on environment and disk availability.

@@ -193,12 +193,12 @@ The six-repository acceptance runner expects sibling checkouts. It retains comma
 - Migration guards are not an atomic migration protocol or automatic database undo.
 - PostgreSQL restores replace objects in the selected dump, not unrelated later-created objects; MongoDB restores are not globally atomic across collections.
 - Dashboard Connected means API reachability, not whole-stack health.
-- The local admin interface requires a separately secured access layer before public exposure.
+- Native authenticated/TLS administration is available; non-loopback listeners refuse to start without both. The default remains loopback HTTP for compatibility. See the [administration guide](docs/ADMINISTRATION.md) before exposing anything.
 - Runtime isolation, exhaustive fault schedules and physical storage/power failures are not universally certified by the retained checks.
 
 ## Documentation and related projects
 
-[Architecture](docs/architecture.md) · [Recovery](docs/MIGRATION_SAFETY.md) · [Validation](docs/VALIDATION_2026-10.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+[Architecture](docs/architecture.md) · [Recovery](docs/MIGRATION_SAFETY.md) · [Administration/install](docs/ADMINISTRATION.md) · [Validation](docs/VALIDATION_2026-10.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 [Mini-Docker](https://github.com/Yumekaz/Mini-Docker) and [DuraFlow](https://github.com/Yumekaz/DURAFLOW) are the deployment dependencies. [FailForge](https://github.com/Yumekaz/FAILFORGE), [MiniDB](https://github.com/Yumekaz/Mini-Redis-Cassandra) and [Coordination-service](https://github.com/Yumekaz/Coordination-service) are connected verification/reference projects, not Cairn's production metadata store.
 

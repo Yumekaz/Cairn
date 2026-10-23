@@ -112,6 +112,8 @@ jobs:
         run: |
           go build -o bin/cairn ./cmd/cairn
           go build -o bin/cairnd ./cmd/cairnd
+      - name: Control-plane race detector (required)
+        run: CGO_ENABLED=1 go test -race ./internal/... -count=1 -timeout 10m
       - name: Supported source installation on clean Linux runner
         run: |
           bash scripts/install.sh

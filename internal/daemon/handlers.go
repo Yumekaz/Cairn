@@ -1040,9 +1040,18 @@ func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if svc.RuntimeID != "" {
-		if err := s.runtime.StartContainer(r.Context(), svc.RuntimeID); err != nil {
-			s.error(w, http.StatusInternalServerError, "failed to start container: "+err.Error())
-			return
+		info, inspectErr := s.runtime.InspectContainer(r.Context(), svc.RuntimeID)
+		if inspectErr != nil || info == nil || info.State != runtime.StateRunning {
+			if err := s.runtime.StartContainer(r.Context(), svc.RuntimeID); err != nil {
+				// A lost acknowledgement or concurrent completed Start is
+				// resolved only by positive runtime evidence, never by ignoring
+				// the error or trusting the controller's saved desired state.
+				info, inspectErr = s.runtime.InspectContainer(r.Context(), svc.RuntimeID)
+				if inspectErr != nil || info == nil || info.State != runtime.StateRunning {
+					s.error(w, http.StatusInternalServerError, "failed to start container: "+err.Error())
+					return
+				}
+			}
 		}
 	} else {
 		s.error(w, http.StatusBadRequest, "service has no deployed container")

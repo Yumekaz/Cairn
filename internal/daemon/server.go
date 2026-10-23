@@ -103,6 +103,13 @@ func (s *Server) setupMiddleware() {
 
 // Start listens on the configured Unix socket and optionally on TCP.
 func (s *Server) Start(ctx context.Context) error {
+	tcpListener, tcpServer, err := s.prepareTCPServer()
+	if err != nil {
+		return fmt.Errorf("prepare dashboard transport: %w", err)
+	}
+	if tcpListener != nil {
+		defer tcpListener.Close()
+	}
 	socketPath := s.config.SocketPath
 
 	// Ensure the socket directory is private when it is managed by Cairn. A
@@ -167,29 +174,20 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.startMetadataBackupLoop(ctx)
 
 	// Start secondary TCP server for dashboard/API if configured
-	if s.config.DashboardAddr != "" {
-		tcpListener, err := net.Listen("tcp", s.config.DashboardAddr)
-		if err == nil {
-			log.Printf("cairnd: Dashboard and API TCP server listening on http://%s", s.config.DashboardAddr)
-			httpServerTCP := &http.Server{
-				Handler:           s.tcpHTTPHandler(),
-				ReadHeaderTimeout: 5 * time.Second,
+	if tcpServer != nil {
+		log.Printf("cairnd: Dashboard transport ready on %s (TLS=%t, authentication=%t)", tcpListener.Addr(), tcpServer.TLSConfig != nil, s.config.AdminTokenFile != "")
+		go func() {
+			if err := tcpServer.Serve(tcpListener); err != nil && err != http.ErrServerClosed {
+				log.Printf("cairnd: Dashboard TCP server error: %v", err)
 			}
-			go func() {
-				if err := httpServerTCP.Serve(tcpListener); err != nil && err != http.ErrServerClosed {
-					log.Printf("cairnd: Dashboard TCP server error: %v", err)
-				}
-			}()
-			// Graceful shutdown for TCP server
-			go func() {
-				<-ctx.Done()
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				httpServerTCP.Shutdown(shutdownCtx)
-			}()
-		} else {
-			log.Printf("cairnd: Warning: Failed to start dashboard TCP server on %s: %v", s.config.DashboardAddr, err)
-		}
+		}()
+		// Graceful shutdown for TCP server
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tcpServer.Shutdown(shutdownCtx)
+		}()
 	}
 
 	httpServer := &http.Server{

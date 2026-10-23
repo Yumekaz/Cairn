@@ -34,7 +34,11 @@ var dashboardCmd = &cobra.Command{
 			return fmt.Errorf("dashboard address is disabled or not configured in ~/.cairn/cairnd-config.yaml")
 		}
 
-		url := fmt.Sprintf("http://%s", cfg.DashboardAddr)
+		scheme := "http"
+		if cfg.DashboardTLSCert != "" && cfg.DashboardTLSKey != "" {
+			scheme = "https"
+		}
+		url := fmt.Sprintf("%s://%s", scheme, cfg.DashboardAddr)
 		fmt.Printf("Cairn Dashboard is running at: %s\n", url)
 		fmt.Println("Opening in default browser...")
 

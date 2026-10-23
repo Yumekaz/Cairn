@@ -7,14 +7,26 @@ import (
 	"strings"
 
 	"github.com/yumekaz/cairn/internal/api"
+	"github.com/yumekaz/cairn/internal/config"
 )
 
 // Service virtual hosts are application routes, not alternate admin origins.
 // ServeHTTP never falls back to the admin router for these hosts, even when
 // the service does not exist. Keep the strict guard on the control plane.
 func (s *Server) tcpHTTPHandler() http.Handler {
-	admin := dashboardHTTPGuard(s, s.config.DashboardAddr)
-	_, listenPort, _ := net.SplitHostPort(s.config.DashboardAddr)
+	handler, err := s.tcpHTTPHandlerWithConfig(s.config)
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "admin configuration invalid", 500) })
+	}
+	return handler
+}
+
+func (s *Server) tcpHTTPHandlerWithConfig(cfg *config.DaemonConfig) (http.Handler, error) {
+	admin, err := adminHTTPHandler(s, cfg)
+	if err != nil {
+		return nil, err
+	}
+	_, listenPort, _ := net.SplitHostPort(cfg.DashboardAddr)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if parsedHost, port, err := net.SplitHostPort(host); err == nil {
@@ -29,7 +41,7 @@ func (s *Server) tcpHTTPHandler() http.Handler {
 			return
 		}
 		admin.ServeHTTP(w, r)
-	})
+	}), nil
 }
 
 // The TCP dashboard is a local admin API, not an authenticated multi-tenant
@@ -37,6 +49,10 @@ func (s *Server) tcpHTTPHandler() http.Handler {
 // otherwise a hostile website can reach it through CSRF or DNS rebinding.
 // CLI traffic over the permission-protected Unix socket is unaffected.
 func dashboardHTTPGuard(next http.Handler, address string) http.Handler {
+	return dashboardHTTPGuardHosts(next, address, nil)
+}
+
+func dashboardHTTPGuardHosts(next http.Handler, address string, aliases []string) http.Handler {
 	listenHost, listenPort, _ := net.SplitHostPort(address)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, port, err := net.SplitHostPort(r.Host)
@@ -50,6 +66,11 @@ func dashboardHTTPGuard(next http.Handler, address string) http.Handler {
 				allowedHost = host == localHost
 			}
 		}
+		for _, alias := range aliases {
+			if strings.EqualFold(host, alias) {
+				allowedHost = true
+			}
+		}
 		if err != nil || port != listenPort || !allowedHost {
 			http.Error(w, "unexpected dashboard Host", http.StatusForbidden)
 			return
@@ -57,7 +78,11 @@ func dashboardHTTPGuard(next http.Handler, address string) http.Handler {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
 			parsed, err := url.Parse(origin)
-			if err != nil || parsed.Scheme != "http" || !strings.EqualFold(parsed.Host, r.Host) || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+			if err != nil || parsed.Scheme != scheme || !strings.EqualFold(parsed.Host, r.Host) || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 				http.Error(w, "cross-origin dashboard request rejected", http.StatusForbidden)
 				return
 			}
