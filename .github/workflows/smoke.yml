@@ -6,6 +6,75 @@ on:
   pull_request:
 
 jobs:
+  packaged-system-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Cairn
+      - name: Read exact package dependencies
+        id: packages
+        working-directory: Cairn
+        run: |
+          for project in DURAFLOW Mini-Docker; do
+            revision=$(awk -v project="$project" '$1==project {print $2}' stack.lock)
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            key=${project//-/_}
+            echo "$key=$revision" >> "$GITHUB_OUTPUT"
+          done
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/DURAFLOW
+          ref: ${{ steps.packages.outputs.DURAFLOW }}
+          path: DURAFLOW
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Mini-Docker
+          ref: ${{ steps.packages.outputs.Mini_Docker }}
+          path: Mini-Docker
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: Cairn/go.mod
+      - name: Offline package build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv busybox-static iproute2 iptables
+          python3 -m venv Mini-Docker/venv
+          Mini-Docker/venv/bin/pip install build setuptools wheel
+          mkdir -p Mini-Docker/rootfs/bin
+          cp /usr/bin/busybox Mini-Docker/rootfs/bin/busybox
+      - name: Package, install and verify actual system services
+        working-directory: Cairn
+        run: |
+          set -euo pipefail
+          mkdir -p bin verification
+          go build -o bin/cairn ./cmd/cairn
+          bin/cairn init
+          chmod 700 "$HOME/.cairn"
+          python3 scripts/system_install.py prepare --output "$PWD/verification/bundle" > verification/prepare.log 2>&1
+          digest=$(sha256sum verification/bundle/manifest.json | awk '{print $1}')
+          sudo python3 scripts/system_install.py apply --bundle "$PWD/verification/bundle" --manifest-sha256 "$digest" > verification/install.log 2>&1
+          python3 scripts/verify_installed_admin.py > verification/admin.jsonl
+          export CAIRN_ROOTFS=$(find /opt/cairn/releases -name installation.json -printf '%h/rootfs\n')
+          export MINI_DOCKER_SOCKET=/run/cairn-runtime/mini-docker.sock
+          NOTES_PROOF_PORT=8093 python3 scripts/notes_smoke.py > verification/notes.json
+          proof_service=$(python3 -c 'import json; print(json.load(open("verification/notes.json"))["service"])')
+          python3 scripts/verify_installed_recovery.py --service "$proof_service" --port 8093 > verification/recovery.jsonl
+          systemctl is-enabled cairn.service cairn-runtime.service > verification/boot-enabled.txt
+          systemctl show cairn.service cairn-runtime.service -p User -p Group -p ExecStart -p ActiveState > verification/units.txt
+      - name: Stop only the test installation
+        if: always()
+        run: sudo systemctl disable --now cairn.service cairn-runtime.service || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cairn-packaged-system-install
+          path: |
+            Cairn/verification/*.log
+            Cairn/verification/*.json
+            Cairn/verification/*.jsonl
+            Cairn/verification/*.txt
   stateful-spine-and-databases:
     runs-on: ubuntu-latest
     timeout-minutes: 25
