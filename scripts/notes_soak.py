@@ -2,9 +2,11 @@
 """Bounded real-app soak; creates and changes only its own notes-proof fixture."""
 import argparse
 import contextlib
+import errno
 import http.client
 import io
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -14,6 +16,69 @@ import subprocess
 import time
 
 import notes_smoke as notes
+
+
+MAX_SAMPLES = 20000
+
+
+class SoakClock:
+    """Monotonic sampling time, with independent gap/suspend evidence."""
+
+    def __init__(self, interval_seconds):
+        self.max_gap_seconds = max(90, interval_seconds * 3)
+        self.boot_clock = (getattr(time, "CLOCK_BOOTTIME", None)
+                           if hasattr(time, "clock_gettime") else None)
+        before, now, wall, boot = self._read(initial=True)
+        self.started = self.previous_monotonic = now
+        self.previous_sample = now
+        self.previous_wall = wall
+        self.previous_boot = boot
+        # Bracket the boot/monotonic offset so scheduler delay between clock
+        # reads cannot masquerade as suspension. Tighten this bound as we go.
+        self.boot_offset_upper = None if boot is None else boot - before
+
+    def _read(self, initial=False):
+        before = time.monotonic()
+        wall = time.time()
+        boot = None
+        if self.boot_clock is not None:
+            try:
+                boot = time.clock_gettime(self.boot_clock)
+            except (OSError, ValueError) as exc:
+                unsupported = (isinstance(exc, ValueError) or
+                               exc.errno in (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP))
+                if not initial or not unsupported:
+                    raise InterruptedError("lost CLOCK_BOOTTIME evidence; continuity is not proven") from exc
+                self.boot_clock = None
+        now = time.monotonic()
+        if not all(math.isfinite(value) for value in (before, now, wall)
+                   + (() if boot is None else (boot,))):
+            raise InterruptedError("invalid clock evidence; continuity is not proven")
+        return before, now, wall, boot
+
+    def check(self):
+        before, now, wall, boot = self._read()
+        if (now < self.previous_monotonic or before > now
+                or now - self.previous_monotonic > self.max_gap_seconds
+                or now - self.previous_sample > self.max_gap_seconds
+                or wall - self.previous_wall > self.max_gap_seconds):
+            raise InterruptedError("host suspension or sampling gap; continuity is not proven")
+        if boot is not None:
+            # One microsecond accommodates floating-point clock precision, not
+            # a sampling interval: even short observed suspends invalidate proof.
+            if boot < self.previous_boot or boot - now > self.boot_offset_upper + 0.000001:
+                raise InterruptedError("host suspension observed by CLOCK_BOOTTIME vs CLOCK_MONOTONIC; continuity is not proven")
+            self.boot_offset_upper = min(self.boot_offset_upper, boot - before)
+        self.previous_monotonic, self.previous_wall, self.previous_boot = now, wall, boot
+        return now - self.started
+
+    def sample_completed(self):
+        elapsed = self.check()
+        self.previous_sample = self.started + elapsed
+        return elapsed
+
+    def elapsed(self):
+        return time.monotonic() - self.started
 
 
 def daemon_main_pid(unit, scope):
@@ -64,10 +129,11 @@ def main():
                         help="systemd manager owning the observed controller")
     parser.add_argument("--reads-per-sample", type=int, default=3)
     args = parser.parse_args()
-    if not 1 <= args.duration_seconds <= 14400 or args.interval_seconds < 1:
-        parser.error("duration must be 1..14400 seconds and interval >=1")
-    if args.duration_seconds / args.interval_seconds > 20000:
-        parser.error("at most 20000 samples are allowed; increase the interval")
+    if (not 1 <= args.duration_seconds <= 14400
+            or not math.isfinite(args.interval_seconds) or args.interval_seconds < 1):
+        parser.error("duration must be 1..14400 seconds and interval finite and >=1")
+    if math.ceil(args.duration_seconds / args.interval_seconds) + 1 > MAX_SAMPLES:
+        parser.error("at most 20000 samples, including the terminal sample, are allowed; increase the interval")
     if not 1 <= args.reads_per_sample <= 16:
         parser.error("reads per sample must be 1..16")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -75,11 +141,18 @@ def main():
     status = {"state": "starting", "target_seconds": args.duration_seconds,
               "purpose": "acceptance-session" if args.duration_seconds >= 7200 else "runner-smoke",
               "started_unix": time.time(), "requests": 0, "errors": 0,
+              "sampled_elapsed_seconds": 0.0, "elapsed_seconds": 0.0, "total_elapsed_seconds": 0.0,
+              "samples": 0, "terminal_sample_verified": False,
               "max_data_bytes": 4 * 1024 * 1024}
     latencies = []
     fixture = None
+    soak_clock = None
     def save():
         status["updated_unix"] = time.time()
+        if soak_clock is not None:
+            # Total time since sampling began includes restore and cleanup;
+            # sampled_elapsed_seconds is advanced only by successful samples.
+            status["total_elapsed_seconds"] = soak_clock.elapsed()
         encoded = json.dumps(status, indent=2)
         target = args.output / "status.json"
         temporary = target.with_suffix(".pending")
@@ -118,19 +191,22 @@ def main():
         notes.expect("first\n")
         volume = notes.api("GET", f'/volumes/{fixture["data_volume"]}')
         data_path = Path(volume["host_path"])
-        started = time.monotonic()
-        previous_wall = time.time()
+        # Sleeps are capped at the remaining target duration. Use that same
+        # finite bound for continuity, even for an enormous finite CLI interval.
+        soak_clock = SoakClock(min(args.interval_seconds, args.duration_seconds))
+        status["suspend_detection_clock"] = "CLOCK_BOOTTIME" if soak_clock.boot_clock is not None else None
+        if args.duration_seconds >= 7200 and soak_clock.boot_clock is None:
+            raise InterruptedError("acceptance session requires CLOCK_BOOTTIME suspension evidence")
         expected = "first\n"
         sequence = 0
         previous_daemon = previous_runtime = None
         daemon_restarts = runtime_restarts = 0
         status["state"] = "running"
         with (args.output / "samples.jsonl").open("a", buffering=1) as samples:
-            while time.monotonic() - started < args.duration_seconds:
-                now = time.time()
-                if now - previous_wall > max(90, args.interval_seconds * 3):
-                    raise InterruptedError("host suspension or sampling gap; continuity is not proven")
-                previous_wall = now
+            while True:
+                sample_started = soak_clock.check()
+                if sequence >= MAX_SAMPLES:
+                    raise InterruptedError("sample bound exhausted before terminal evidence; continuity is not proven")
                 sequence += 1
                 marker = f"soak-{sequence:08d}"
                 before = time.monotonic()
@@ -163,7 +239,14 @@ def main():
                 if previous_runtime is not None and runtime_identity != previous_runtime:
                     runtime_restarts += 1
                 previous_daemon, previous_runtime = daemon_identity, runtime_identity
-                status.update(elapsed_seconds=round(time.monotonic()-started, 2), samples=sequence,
+                sampled_elapsed = soak_clock.sample_completed()
+                terminal_sample = sample_started >= args.duration_seconds
+                # Only completed, successful samples advance sampled operation.
+                # Never round this duration up to the requested target.
+                status.update(sampled_elapsed_seconds=sampled_elapsed, elapsed_seconds=sampled_elapsed,
+                              sample_started_elapsed_seconds=sample_started,
+                              total_elapsed_seconds=sampled_elapsed, samples=sequence,
+                              terminal_sample_verified=terminal_sample,
                               data_bytes=data_bytes, runtime_id=service["runtime_id"], daemon=daemon,
                               daemon_resources=daemon_metrics, runtime_resources=runtime_metrics,
                               daemon_restarts=daemon_restarts, runtime_restarts=runtime_restarts,
@@ -173,10 +256,16 @@ def main():
                 samples.write(json.dumps(status) + "\n")
                 os.fsync(samples.fileno())
                 save()
-                time.sleep(min(args.interval_seconds, max(0, args.duration_seconds-(time.monotonic()-started))))
+                if terminal_sample:
+                    break
+                time.sleep(min(args.interval_seconds, max(0, args.duration_seconds-soak_clock.elapsed())))
+        if not status["terminal_sample_verified"] or status["sampled_elapsed_seconds"] < args.duration_seconds:
+            raise InterruptedError("missing successful terminal sample; continuity is not proven")
+        soak_clock.check()
         notes.api("POST", f'/volumes/{fixture["data_volume"]}/restore', {"backup_id": fixture["backup"]})
         notes.expect("first\n")
-        status.update(state="passed", restore_verified=True, elapsed_seconds=round(time.monotonic()-started,2))
+        soak_clock.check()
+        status.update(state="passed", restore_verified=True)
         save()
     except BaseException as exc:
         status.update(state="interrupted" if isinstance(exc,InterruptedError) else "failed",
@@ -184,6 +273,7 @@ def main():
         save()
         raise
     finally:
+        completion_interruption = None
         if fixture:
             try:
                 notes.api("POST", f'/services/{fixture["service"]}/stop')
@@ -193,7 +283,17 @@ def main():
                     status["state"] = "failed"
                     status["errors"] += 1
                 save()
+        if soak_clock is not None:
+            if status["state"] == "passed":
+                try:
+                    soak_clock.check()
+                except InterruptedError as exc:
+                    status.update(state="interrupted", errors=status["errors"]+1, failure=str(exc))
+                    completion_interruption = exc
+            save()
         print(json.dumps(status), flush=True)
+        if completion_interruption is not None:
+            raise completion_interruption
         if status.get("cleanup_error") and status["state"]=="failed":
             raise RuntimeError("soak fixture cleanup failed; inspect the retained status")
 

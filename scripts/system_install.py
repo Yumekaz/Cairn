@@ -6,6 +6,7 @@ The controller retains the owner's existing ~/.cairn state. Runtime socket
 access is root-equivalent and is granted only to that owner's primary group.
 """
 import argparse
+import contextlib
 import hashlib
 import http.client
 import json
@@ -247,19 +248,30 @@ def prepare(args):
 
 def secure_root_directory(path):
     def validate_existing():
+        missing = []
         for current in (path, *path.parents):
             try:
                 info = current.lstat()
             except FileNotFoundError:
+                missing.append(current)
                 continue
             if stat.S_ISLNK(info.st_mode):
                 raise ValueError('refusing symlinked system installation directory: ' + str(current))
             if info.st_uid != 0 or info.st_mode & 0o022:
                 raise ValueError('system installation directory is not root-controlled: ' + str(current))
+            if not info.st_mode & 0o001:
+                raise ValueError('system installation ancestor does not allow unprivileged controller traversal: ' + str(current))
+        return missing
     # Do not even create a privileged leaf below an unsafe ancestor. Checking
     # only the new root-owned leaf would not protect the release from rename.
-    validate_existing()
-    path.mkdir(mode=0o755, parents=True, exist_ok=True)
+    missing = validate_existing()
+    for current in reversed(missing):
+        current.mkdir(mode=0o700)
+        descriptor = os.open(current, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(descriptor, 0o755)
+        finally:
+            os.close(descriptor)
     validate_existing()
 
 
@@ -269,25 +281,49 @@ def copy_verified(source, destination, expected, mode):
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError('bundle artifact must be a regular file')
         digest = hashlib.sha256()
-        with os.fdopen(fd, 'rb', closefd=False) as stream, destination.open('xb') as output:
-            while block := stream.read(1024 * 1024):
-                digest.update(block)
-                output.write(block)
-            output.flush()
-            os.fsync(output.fileno())
-        if digest.hexdigest() != expected:
-            raise ValueError('bundle artifact checksum mismatch')
-        os.chmod(destination, mode)
+        output_fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, 'rb', closefd=False) as stream, os.fdopen(output_fd, 'wb', closefd=False) as output:
+                while block := stream.read(1024 * 1024):
+                    digest.update(block)
+                    output.write(block)
+                output.flush()
+                if digest.hexdigest() != expected:
+                    raise ValueError('bundle artifact checksum mismatch')
+                # Do not expose a writable output window, even under umask000.
+                # Set final permissions on the same verified descriptor.
+                os.fchmod(output_fd, mode)
+                os.fsync(output_fd)
+        finally:
+            os.close(output_fd)
     finally:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def private_install_umask():
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def privileged_python_environment():
+    return {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8'}
+
+
 def apply(args):
+    with private_install_umask():
+        return apply_private(args)
+
+
+def apply_private(args):
     if os.geteuid() != 0:
         raise ValueError('apply requires root')
     # Detect this before creating a partial root-owned release. The required
     # OS package is a deliberate prerequisite, not an implicit network install.
-    run(['/usr/bin/python3', '-I', '-c', 'import ensurepip, venv'])
+    run(['/usr/bin/python3', '-I', '-c', 'import ensurepip, venv'], cwd='/', env=privileged_python_environment())
     bundle = check_path(args.bundle)
     data = (bundle / 'manifest.json').read_bytes()
     digest = hashlib.sha256(data).hexdigest()
@@ -329,7 +365,7 @@ def apply(args):
     secure_root_directory(prefix)
     secure_root_directory(prefix / 'releases')
     release = prefix / 'releases' / digest[:20]
-    release.mkdir(mode=0o755, exist_ok=False)
+    release.mkdir(mode=0o700, exist_ok=False)
     files = manifest['artifacts']
     wheels = [name for name in files if name.endswith('.whl')]
     if set(files) != {'cairn', 'cairnd', 'busybox', *wheels} or len(wheels) != 1:
@@ -339,11 +375,14 @@ def apply(args):
             raise ValueError('invalid bundle artifact name')
         copy_verified(bundle / name, release / name, expected, 0o644 if name.endswith('.whl') else 0o755)
     atomic(release / 'manifest.json', data, 0o644)
-    run(['/usr/bin/python3', '-m', 'venv', release / 'venv'])
-    run([release / 'venv/bin/python', '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', release / wheels[0]])
+    run(['/usr/bin/python3', '-I', '-m', 'venv', release / 'venv'], cwd=release, env=privileged_python_environment())
+    run([release / 'venv/bin/python', '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', release / wheels[0]], cwd=release, env=privileged_python_environment())
     rootfs = release / 'rootfs'
     for name in ('bin', 'dev', 'proc', 'sys', 'tmp', 'etc'):
-        (rootfs / name).mkdir(parents=True)
+        directory = rootfs / name
+        directory.mkdir(parents=True)
+        os.chmod(directory, 0o755)
+    os.chmod(rootfs, 0o755)
     shutil.copyfile(release / 'busybox', rootfs / 'bin/busybox')
     os.chmod(rootfs / 'bin/busybox', 0o755)
     os.chmod(rootfs / 'tmp', 0o1777)
@@ -353,9 +392,12 @@ def apply(args):
     inventory = subprocess.check_output([release / 'venv/bin/python', '-I', '-c',
         'import json; from mini_docker.container import Container; '
         'print(json.dumps([{"id": c.id,"status": c.status} for c in Container().list(True)]))'], text=True,
-        env={**os.environ, 'MINI_DOCKER_ROOT': '/var/lib/mini-docker'})
+        cwd=release, env={**privileged_python_environment(), 'MINI_DOCKER_ROOT': '/var/lib/mini-docker'})
     if any(c['status'] == 'unknown' for c in json.loads(inventory)):
         raise ValueError('unverified legacy runtime processes need explicit inspection; no services were changed')
+    # Publish only after every artifact and the root-owned runtime are verified.
+    # The controller needs the binaries/rootfs; private runtime files stay root-only.
+    os.chmod(release, 0o755)
     owner = (account.pw_uid, account.pw_gid)
     token = Path(cfg['admin_token_file'])
     if not token.exists():

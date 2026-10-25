@@ -4,6 +4,10 @@ set -euo pipefail
 [[ "$(hostname)" == cairn-acceptance-vm ]] || { echo 'Refusing to run outside the acceptance VM' >&2; exit 2; }
 exec > >(tee -a /home/ubuntu/cairn-vm-install.log) 2>&1
 sudo cloud-init status --wait
+# A power/interruption during initial OS provisioning can leave dpkg partially
+# configured even after cloud-init reports done. Repair only this named guest;
+# never mistake an unfinished package transaction for an application failure.
+sudo dpkg --configure -a
 # A interrupted first boot can mark a cloud-init package module as visited
 # before every requested package is installed. Verify/install the actual
 # runtime prerequisites rather than treating "status: done" as proof.

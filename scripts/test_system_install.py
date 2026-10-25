@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import types
@@ -12,6 +13,54 @@ spec.loader.exec_module(installer)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_verified_outputs_are_private_at_creation_even_under_umask_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, target = root / 'source', root / 'target'
+            source.write_bytes(b'verified bytes')
+            observed = []
+            original_open = os.open
+            def audit_open(path, flags, mode=0o777, **kwargs):
+                descriptor = original_open(path, flags, mode, **kwargs)
+                if Path(path) == target:
+                    observed.append(os.fstat(descriptor).st_mode & 0o777)
+                return descriptor
+            previous = os.umask(0)
+            try:
+                with patch.object(installer.os, 'open', side_effect=audit_open):
+                    installer.copy_verified(source, target, installer.sha(source), 0o755)
+            finally:
+                os.umask(previous)
+            self.assertEqual(observed, [0o600])
+            self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(installer.sha(source), installer.sha(target))
+
+    def test_private_install_umask_is_restrictive_and_restored_on_failure(self):
+        previous = os.umask(0)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'injected'):
+                with installer.private_install_umask():
+                    active = os.umask(0o077)
+                    self.assertEqual(active, 0o077)
+                    raise RuntimeError('injected')
+            restored = os.umask(0)
+            self.assertEqual(restored, 0)
+        finally:
+            os.umask(previous)
+
+    def test_privileged_venv_uses_isolation_and_controlled_environment(self):
+        import ast
+        source = Path(installer.__file__).read_text()
+        calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'run'
+                 and node.args and isinstance(node.args[0], ast.List)]
+        venv_calls = [node for node in calls if any(isinstance(item, ast.Constant) and item.value == 'venv' for item in node.args[0].elts)]
+        self.assertEqual(len(venv_calls), 1)
+        argv = venv_calls[0].args[0].elts
+        self.assertEqual([item.value for item in argv[:4]], ['/usr/bin/python3', '-I', '-m', 'venv'])
+        self.assertTrue({'cwd', 'env'} <= {item.arg for item in venv_calls[0].keywords})
+        self.assertEqual(set(installer.privileged_python_environment()), {'PATH', 'LANG'})
+
     def prebuilt(self, root):
         source, target = root / 'source', root / 'output'
         source.mkdir(); target.mkdir()
@@ -51,7 +100,26 @@ class InstallationTests(unittest.TestCase):
     def test_root_controlled_alternative_keeps_the_same_ancestor_checks(self):
         with patch.object(Path, 'lstat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o40755)), patch.object(Path, 'mkdir') as create:
             installer.secure_root_directory(Path('/usr/local/lib/cairn'))
-            create.assert_called_once_with(mode=0o755, parents=True, exist_ok=True)
+            create.assert_not_called()  # Existing ancestor permissions are never broadened.
+
+    def test_new_prefix_is_traversable_even_with_private_process_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'prefix'
+            original_lstat = Path.lstat
+            def metadata(path):
+                if path == target:
+                    real = original_lstat(path)
+                    return types.SimpleNamespace(st_uid=0, st_mode=real.st_mode)
+                return types.SimpleNamespace(st_uid=0, st_mode=0o40755)
+            with patch.object(Path, 'lstat', autospec=True, side_effect=metadata), installer.private_install_umask():
+                installer.secure_root_directory(target)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+
+    def test_existing_private_prefix_is_not_silently_made_public(self):
+        with patch.object(Path, 'lstat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o40700)), patch.object(Path, 'mkdir') as create:
+            with self.assertRaisesRegex(ValueError, 'controller traversal'):
+                installer.secure_root_directory(Path('/usr/local/lib/cairn'))
+            create.assert_not_called()
 
     def test_root_owned_symlinked_ancestor_is_rejected(self):
         def metadata(path):
