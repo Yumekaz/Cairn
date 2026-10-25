@@ -213,13 +213,21 @@ def prepare(args):
 
 
 def secure_root_directory(path):
-    if path.is_symlink():
-        raise ValueError('refusing symlinked system installation directory')
+    def validate_existing():
+        for current in (path, *path.parents):
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError('refusing symlinked system installation directory: ' + str(current))
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError('system installation directory is not root-controlled: ' + str(current))
+    # Do not even create a privileged leaf below an unsafe ancestor. Checking
+    # only the new root-owned leaf would not protect the release from rename.
+    validate_existing()
     path.mkdir(mode=0o755, parents=True, exist_ok=True)
-    for current in (path, *path.parents):
-        info = current.stat()
-        if info.st_uid != 0 or info.st_mode & 0o022:
-            raise ValueError('system installation directory is not root-controlled')
+    validate_existing()
 
 
 def copy_verified(source, destination, expected, mode):
@@ -284,9 +292,10 @@ def apply(args):
             pass
         else:
             raise ValueError('another runtime answers at the old configured socket; no duplicate will be started')
-    secure_root_directory(PREFIX)
-    secure_root_directory(PREFIX / 'releases')
-    release = PREFIX / 'releases' / digest[:20]
+    prefix = check_path(args.prefix)
+    secure_root_directory(prefix)
+    secure_root_directory(prefix / 'releases')
+    release = prefix / 'releases' / digest[:20]
     release.mkdir(mode=0o755, exist_ok=False)
     files = manifest['artifacts']
     wheels = [name for name in files if name.endswith('.whl')]
@@ -366,6 +375,8 @@ def main():
     install = commands.add_parser('apply')
     install.add_argument('--bundle', type=Path, required=True)
     install.add_argument('--manifest-sha256', required=True)
+    install.add_argument('--prefix', type=Path, default=PREFIX,
+                         help='Root-controlled install directory (default /opt/cairn); every existing ancestor must be root-owned and not group/other-writable')
     args = parser.parse_args()
     try:
         (prepare if args.command == 'prepare' else apply)(args)

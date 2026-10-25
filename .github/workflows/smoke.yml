@@ -54,9 +54,9 @@ jobs:
           chmod 700 "$HOME/.cairn"
           python3 scripts/system_install.py prepare --output "$PWD/verification/bundle" > verification/prepare.log 2>&1
           digest=$(sha256sum verification/bundle/manifest.json | awk '{print $1}')
-          sudo python3 scripts/system_install.py apply --bundle "$PWD/verification/bundle" --manifest-sha256 "$digest" > verification/install.log 2>&1
+          sudo python3 scripts/system_install.py apply --bundle "$PWD/verification/bundle" --manifest-sha256 "$digest" --prefix /usr/local/lib/cairn > verification/install.log 2>&1
           python3 scripts/verify_installed_admin.py > verification/admin.jsonl
-          export CAIRN_ROOTFS=$(find /opt/cairn/releases -name installation.json -printf '%h/rootfs\n')
+          export CAIRN_ROOTFS=$(find /usr/local/lib/cairn/releases -name installation.json -printf '%h/rootfs\n')
           export MINI_DOCKER_SOCKET=/run/cairn-runtime/mini-docker.sock
           NOTES_PROOF_PORT=8093 python3 scripts/notes_smoke.py > verification/notes.json
           proof_service=$(python3 -c 'import json; print(json.load(open("verification/notes.json"))["service"])')

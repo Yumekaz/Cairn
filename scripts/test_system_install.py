@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('system_install', Path(__file__).with_name('system_install.py'))
 installer = importlib.util.module_from_spec(spec)
@@ -11,6 +12,27 @@ spec.loader.exec_module(installer)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_unsafe_ancestor_is_rejected_before_any_directory_is_created(self):
+        def metadata(path):
+            return types.SimpleNamespace(st_uid=0, st_mode=0o40775 if str(path) == '/opt' else 0o40755)
+        with patch.object(Path, 'lstat', autospec=True, side_effect=metadata), patch.object(Path, 'mkdir') as create:
+            with self.assertRaisesRegex(ValueError, 'not root-controlled: /opt'):
+                installer.secure_root_directory(Path('/opt/cairn'))
+            create.assert_not_called()
+
+    def test_root_controlled_alternative_keeps_the_same_ancestor_checks(self):
+        with patch.object(Path, 'lstat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o40755)), patch.object(Path, 'mkdir') as create:
+            installer.secure_root_directory(Path('/usr/local/lib/cairn'))
+            create.assert_called_once_with(mode=0o755, parents=True, exist_ok=True)
+
+    def test_root_owned_symlinked_ancestor_is_rejected(self):
+        def metadata(path):
+            return types.SimpleNamespace(st_uid=0, st_mode=0o120777 if str(path) == '/usr/local' else 0o40755)
+        with patch.object(Path, 'lstat', autospec=True, side_effect=metadata), patch.object(Path, 'mkdir') as create:
+            with self.assertRaisesRegex(ValueError, 'symlinked'):
+                installer.secure_root_directory(Path('/usr/local/lib/cairn'))
+            create.assert_not_called()
+
     def account(self, home='/home/owner'):
         return types.SimpleNamespace(pw_dir=home, pw_uid=1001, pw_gid=1002)
 

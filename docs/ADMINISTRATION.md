@@ -69,6 +69,13 @@ sudo python3 scripts/system_install.py apply \
 systemctl status cairn.service cairn-runtime.service
 ```
 
+Every existing installation-path ancestor must be root-owned and not writable
+by a group or other users. A root-owned leaf under a writable `/opt` is not safe.
+If your environment intentionally gives ordinary users control of `/opt` (as
+some CI images do), select a separately root-controlled prefix with
+`apply --prefix /usr/local/lib/cairn`. This retains the same ownership/symlink
+checks; do not change shared directory permissions merely to make a test pass.
+
 The installer preserves existing data paths, backs up the previous config,
 enables authentication, and waits for both APIs to be ready. It refuses
 unmanaged service/socket replacement and uncertain legacy runtime identities.

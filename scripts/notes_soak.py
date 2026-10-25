@@ -16,6 +16,12 @@ import time
 import notes_smoke as notes
 
 
+def daemon_main_pid(unit, scope):
+    return subprocess.check_output(
+        ["systemctl", "--" + scope, "show", unit, "-p", "MainPID", "--value"],
+        text=True, timeout=5).strip()
+
+
 def process_resources(pid):
     if not pid or int(pid) <= 0:
         raise RuntimeError("resource sample has no live process PID")
@@ -54,6 +60,8 @@ def main():
     parser.add_argument("--interval-seconds", type=float, default=15)
     parser.add_argument("--runtime-socket", default=os.environ.get("MINI_DOCKER_SOCKET", f"/run/user/{os.getuid()}/mini-docker/mini-docker.sock"))
     parser.add_argument("--daemon-unit", default="cairn-acceptance-live.service")
+    parser.add_argument("--daemon-scope", choices=("user", "system"), default="user",
+                        help="systemd manager owning the observed controller")
     parser.add_argument("--reads-per-sample", type=int, default=3)
     args = parser.parse_args()
     if not 1 <= args.duration_seconds <= 14400 or args.interval_seconds < 1:
@@ -145,7 +153,7 @@ def main():
                     raise RuntimeError("less than 1GiB free; refusing further writes")
                 daemon = notes.api("GET", "/status")
                 service = notes.api("GET", f'/services/{fixture["service"]}')
-                daemon_pid = subprocess.check_output(["systemctl", "--user", "show", args.daemon_unit, "-p", "MainPID", "--value"], text=True).strip()
+                daemon_pid = daemon_main_pid(args.daemon_unit, args.daemon_scope)
                 daemon_metrics = process_resources(daemon_pid)
                 runtime_metrics = runtime_resources(args.runtime_socket, service["runtime_id"])
                 daemon_identity = (daemon_metrics["pid"], daemon_metrics["start_ticks"])
