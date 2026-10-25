@@ -31,36 +31,38 @@ PY
 else
   bash scripts/install.sh
 fi
-if [[ ! -x /opt/cairn-stack/Mini-Docker/venv/bin/python ]]; then
-  sudo /usr/bin/python3 -m venv /opt/cairn-stack/Mini-Docker/venv
-fi
-/opt/cairn-stack/Mini-Docker/venv/bin/python -c 'import sys; assert sys.prefix == "/opt/cairn-stack/Mini-Docker/venv"'
-if [[ "${CAIRN_VM_INSTALL_MODE:-source}" == verified-binaries ]]; then
-  python3 - <<'PY'
-import hashlib,json
-from pathlib import Path
-for name,digest in json.loads(Path('bin/wheel-hashes.json').read_text()).items():
-    assert Path(name).name==name and name.endswith('.whl')
-    assert hashlib.file_digest(Path('bin',name).open('rb'),'sha256').hexdigest()==digest
-print('Verified locally built runtime wheel checksum')
-PY
-  sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --force-reinstall --no-index --no-deps /opt/cairn-stack/SERVER/bin/*.whl
-else
-  sudo /opt/cairn-stack/Mini-Docker/venv/bin/pip install --timeout 120 --no-deps /opt/cairn-stack/Mini-Docker
-fi
 mkdir -p /opt/cairn-stack/Mini-Docker/rootfs/{bin,dev,proc,sys,tmp,etc}
 for command in sh echo cat dd httpd mkdir rmdir sync sleep printf; do
   ln -sf busybox "/opt/cairn-stack/Mini-Docker/rootfs/bin/$command"
 done
 mkdir -p /home/ubuntu/.cairn
-install -m 600 scripts/vm/cairnd-config.yaml /home/ubuntu/.cairn/cairnd-config.yaml
-sudo install -m 644 scripts/vm/mini-docker.service /etc/systemd/system/cairn-proof-runtime.service
-sudo install -m 644 scripts/vm/cairn.service /etc/systemd/system/cairn-proof-daemon.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now cairn-proof-runtime.service cairn-proof-daemon.service
-# Reverification must actually run the newly installed executable, not an
-# already-active daemon retaining its old mapped binary.
-sudo systemctl restart cairn-proof-daemon.service
+chmod 700 /home/ubuntu/.cairn
+if [[ ! -f /home/ubuntu/.cairn/cairnd-config.yaml ]]; then
+  install -m 600 scripts/vm/cairnd-config.yaml /home/ubuntu/.cairn/cairnd-config.yaml
+fi
+# Replace only the old, explicitly identified disposable-VM fixtures. The
+# supported package installer must prove its actual root-owned units at boot,
+# not another pair of source-tree acceptance units.
+for legacy_unit in cairn-proof-daemon.service cairn-proof-runtime.service; do
+  if systemctl cat "$legacy_unit" >/dev/null 2>&1; then
+    legacy_description=$(systemctl show "$legacy_unit" -p Description --value)
+    [[ "$legacy_description" == "Disposable Cairn acceptance VM "* ]] || { echo "Refusing unknown legacy unit: $legacy_unit" >&2; exit 2; }
+    sudo systemctl stop "$legacy_unit"
+    sudo systemctl disable "$legacy_unit"
+  fi
+done
+bundle="/home/ubuntu/cairn-bundles/bundle-$(date +%s%N)"
+if [[ "${CAIRN_VM_INSTALL_MODE:-source}" == verified-binaries ]]; then
+  python3 scripts/system_install.py prepare --output "$bundle" --prebuilt-dir "$PWD/bin" --source-record "$PWD/bin/source-revisions.json"
+else
+  python3 -m venv /opt/cairn-stack/Mini-Docker/venv
+  /opt/cairn-stack/Mini-Docker/venv/bin/pip install build setuptools wheel
+  python3 scripts/system_install.py prepare --output "$bundle"
+fi
+bundle_digest=$(sha256sum "$bundle/manifest.json" | awk '{print $1}')
+sudo python3 scripts/system_install.py apply --bundle "$bundle" --manifest-sha256 "$bundle_digest"
+systemctl is-enabled cairn.service cairn-runtime.service
+export MINI_DOCKER_SOCKET=/run/cairn-runtime/mini-docker.sock
 for attempt in $(seq 1 60); do
   # Doctor intentionally allows an absent cairnd before installation. The
   # integration fixture needs its live API, not merely a usable runtime.
@@ -69,9 +71,12 @@ for attempt in $(seq 1 60); do
 done
 curl --fail --silent --unix-socket /home/ubuntu/.cairn/cairnd.sock http://localhost/status > /home/ubuntu/cairn-ready.json
 /home/ubuntu/.local/bin/cairn doctor
+python3 scripts/verify_installed_admin.py
 if [[ "${CAIRN_VM_INTEGRATION_PROOF:-0}" == 1 ]]; then
-  CAIRN_TEST_HOME=/home/ubuntu CAIRN_ROOTFS=/opt/cairn-stack/Mini-Docker/rootfs MINI_DOCKER_SOCKET=/run/cairn-proof/mini-docker.sock \
+  CAIRN_TEST_HOME=/home/ubuntu CAIRN_ROOTFS=/opt/cairn-stack/Mini-Docker/rootfs \
     bin/cairn-integration-tests -test.v -test.timeout 15m | tee /home/ubuntu/cairn-integration.log
   python3 scripts/verify_integration_log.py /home/ubuntu/cairn-integration.log
 fi
-NOTES_PROOF_PORT=8089 python3 scripts/notes_smoke.py
+NOTES_PROOF_PORT=8089 python3 scripts/notes_smoke.py | tee /home/ubuntu/cairn-notes-proof.json
+proof_service=$(python3 -c 'import json; print(json.load(open("/home/ubuntu/cairn-notes-proof.json"))["service"])')
+python3 scripts/verify_installed_recovery.py --service "$proof_service" --port 8089

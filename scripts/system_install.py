@@ -170,6 +170,24 @@ WantedBy=multi-user.target
     return dict(zip(UNITS, (runtime, daemon)))
 
 
+def stage_prebuilt(source, out):
+    """Stage only checksum-verified artifacts; never run a source-tree binary."""
+    source = check_path(source)
+    binaries = json.loads((source / 'binary-hashes.json').read_text())
+    if not {'cairn', 'cairnd'} <= set(binaries) or set(binaries) - {'cairn', 'cairnd', 'cairn-integration-tests'}:
+        raise ValueError('prebuilt binary manifest must contain cairn and cairnd only (plus optional integration proof)')
+    for name in ('cairn', 'cairnd'):
+        copy_verified(source / name, out / name, binaries[name], 0o755)
+    wheels = json.loads((source / 'wheel-hashes.json').read_text())
+    if len(wheels) != 1:
+        raise ValueError('prebuilt package requires exactly one runtime wheel')
+    name, expected = next(iter(wheels.items()))
+    if Path(name).name != name or not name.endswith('.whl'):
+        raise ValueError('invalid prebuilt wheel name')
+    copy_verified(source / name, out / name, expected, 0o644)
+    return [out / name]
+
+
 def prepare(args):
     if os.geteuid() == 0:
         raise ValueError('prepare must run as the unprivileged installation owner')
@@ -178,35 +196,50 @@ def prepare(args):
     out.mkdir(parents=True, exist_ok=False, mode=0o700)
     runtime = Path(args.runtime_project).resolve()
     python = Path(args.python).absolute()
-    for name in ('cairn', 'cairnd'):
-        run(['go', 'build', '-trimpath', '-o', out / name, './cmd/' + name], cwd=ROOT)
+    if args.prebuilt_dir:
+        if not args.source_record:
+            raise ValueError('prebuilt preparation requires the retained source revision record')
+        revisions = json.loads(args.source_record.read_text())
+        if set(revisions) != {'SERVER', 'DURAFLOW', 'Mini-Docker'}:
+            raise ValueError('prebuilt source record must identify the three deployment repositories')
+        for entry in revisions.values():
+            commit = entry.get('commit', '')
+            if len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
+                raise ValueError('prebuilt source record has an invalid commit')
+        wheels = stage_prebuilt(args.prebuilt_dir, out)
+    else:
+        for name in ('cairn', 'cairnd'):
+            run(['go', 'build', '-trimpath', '-o', out / name, './cmd/' + name], cwd=ROOT)
     cfg = json.loads(subprocess.check_output(
         [str(out / 'cairn'), 'admin', 'config-json'], text=True))
     original_runtime_socket = cfg['mini_docker_socket']
     validate_config(cfg, account)
-    run([python, '-m', 'build', '--wheel', '--no-isolation', '--outdir', out, runtime])
-    wheels = list(out.glob('*.whl'))
+    if not args.prebuilt_dir:
+        run([python, '-m', 'build', '--wheel', '--no-isolation', '--outdir', out, runtime])
+        wheels = list(out.glob('*.whl'))
     if len(wheels) != 1:
         raise ValueError('expected exactly one runtime wheel')
     shutil.copyfile(runtime / 'rootfs/bin/busybox', out / 'busybox')
     os.chmod(out / 'busybox', 0o755)
-    revisions = {}
-    for repo in (ROOT, ROOT.parent / 'DURAFLOW', runtime):
-        revisions[repo.name] = {
-            'commit': subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip(),
-            'working_tree': subprocess.check_output(['git', '-C', repo, 'status', '--short'], text=True),
-            'diff_sha256': hashlib.sha256(subprocess.check_output(['git', '-C', repo, 'diff', 'HEAD'])).hexdigest(),
-            'untracked_sha256': {
-                name: sha(repo / name) for name in subprocess.check_output(
-                    ['git', '-C', repo, 'ls-files', '--others', '--exclude-standard'], text=True).splitlines()
-                if (repo / name).is_file() and not (repo / name).is_symlink()
-            },
-        }
+    if not args.prebuilt_dir:
+        revisions = {}
+        for repo in (ROOT, ROOT.parent / 'DURAFLOW', runtime):
+            revisions[repo.name] = {
+                'commit': subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip(),
+                'working_tree': subprocess.check_output(['git', '-C', repo, 'status', '--short'], text=True),
+                'diff_sha256': hashlib.sha256(subprocess.check_output(['git', '-C', repo, 'diff', 'HEAD'])).hexdigest(),
+                'untracked_sha256': {
+                    name: sha(repo / name) for name in subprocess.check_output(
+                        ['git', '-C', repo, 'ls-files', '--others', '--exclude-standard'], text=True).splitlines()
+                    if (repo / name).is_file() and not (repo / name).is_symlink()
+                },
+            }
     artifacts = {p.name: sha(p) for p in (out / 'cairn', out / 'cairnd', out / 'busybox', wheels[0])}
     manifest = {'version': 1, 'uid': account.pw_uid, 'gid': account.pw_gid,
                 'config': cfg, 'original_config_sha256': sha(Path(account.pw_dir) / '.cairn/cairnd-config.yaml'),
                 'original_runtime_socket': original_runtime_socket,
-                'artifacts': artifacts, 'revisions': revisions}
+                'artifacts': artifacts, 'revisions': revisions,
+                'preparation': 'verified-prebuilt; source compilation is a separate gate' if args.prebuilt_dir else 'local-source-build'}
     atomic(out / 'manifest.json', json.dumps(manifest, indent=2).encode())
     print(json.dumps({'bundle': str(out), 'manifest_sha256': sha(out / 'manifest.json'),
                       'next': 'Review manifest, then sudo python3 scripts/system_install.py apply --bundle PATH --manifest-sha256 DIGEST'}, indent=2))
@@ -372,6 +405,8 @@ def main():
     build.add_argument('--output', type=Path, required=True)
     build.add_argument('--runtime-project', type=Path, default=ROOT.parent / 'Mini-Docker')
     build.add_argument('--python', type=Path, default=ROOT.parent / 'Mini-Docker/venv/bin/python')
+    build.add_argument('--prebuilt-dir', type=Path, help='Use explicit checksum-verified binaries/wheel (never claim source compilation)')
+    build.add_argument('--source-record', type=Path, help='Required source revision JSON for verified-prebuilt preparation')
     install = commands.add_parser('apply')
     install.add_argument('--bundle', type=Path, required=True)
     install.add_argument('--manifest-sha256', required=True)

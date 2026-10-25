@@ -12,6 +12,34 @@ spec.loader.exec_module(installer)
 
 
 class InstallationTests(unittest.TestCase):
+    def prebuilt(self, root):
+        source, target = root / 'source', root / 'output'
+        source.mkdir(); target.mkdir()
+        for name in ('cairn', 'cairnd', 'runtime.whl'):
+            (source / name).write_bytes(name.encode())
+        (source / 'binary-hashes.json').write_text(json.dumps({name: installer.sha(source / name) for name in ('cairn', 'cairnd')}))
+        (source / 'wheel-hashes.json').write_text(json.dumps({'runtime.whl': installer.sha(source / 'runtime.whl')}))
+        return source, target
+
+    def test_prebuilt_staging_checks_binary_and_wheel_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = self.prebuilt(Path(directory))
+            self.assertEqual(installer.stage_prebuilt(source, target), [target / 'runtime.whl'])
+            for name in ('cairn', 'cairnd', 'runtime.whl'):
+                self.assertEqual((source / name).read_bytes(), (target / name).read_bytes())
+            self.assertEqual((target / 'cairn').stat().st_mode & 0o777, 0o755)
+
+    def test_corrupted_prebuilt_binary_and_escaping_wheel_are_rejected(self):
+        for kind in ('binary', 'wheel'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                source, target = self.prebuilt(Path(directory))
+                if kind == 'binary':
+                    (source / 'cairn').write_bytes(b'changed')
+                else:
+                    (source / 'wheel-hashes.json').write_text(json.dumps({'../escape.whl': '0' * 64}))
+                with self.assertRaises(ValueError):
+                    installer.stage_prebuilt(source, target)
+
     def test_unsafe_ancestor_is_rejected_before_any_directory_is_created(self):
         def metadata(path):
             return types.SimpleNamespace(st_uid=0, st_mode=0o40775 if str(path) == '/opt' else 0o40755)

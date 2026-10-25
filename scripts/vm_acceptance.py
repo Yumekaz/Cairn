@@ -119,12 +119,17 @@ def main():
             files = subprocess.check_output(["git", "-C", str(directory), "ls-files", "-co", "--exclude-standard", "-z"]).decode().split("\0")
             revisions[repo] = {"commit": run(["git", "-C", str(directory), "rev-parse", "HEAD"]).strip(),
                                "working_tree": run(["git", "-C", str(directory), "status", "--short"])}
+            revisions[repo]['source_files_sha256'] = {}
             for name in dict.fromkeys(files):
                 if not name or name.startswith((".env", ".agents/", ".codex/")):
                     continue
                 path = directory / name
                 if path.is_file() and not path.is_symlink():
                     archive.add(path, arcname=f"{repo}/{name}", recursive=False)
+                    revisions[repo]['source_files_sha256'][name] = hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
+        source_record = out / 'source-revisions.json'
+        source_record.write_text(json.dumps(revisions, indent=2))
+        archive.add(source_record, arcname='SERVER/bin/source-revisions.json', recursive=False)
         busybox = ROOT.parent / "Mini-Docker/rootfs/bin/busybox"
         if not busybox.is_file() or busybox.stat().st_size == 0:
             raise RuntimeError("static BusyBox fixture is missing")
@@ -179,6 +184,12 @@ def main():
                 last = str(exc)
             time.sleep(5)
         raise RuntimeError(f"guest did not become reachable: {last}")
+    installed_units = ['cairn.service', 'cairn-runtime.service']
+    if args.resume_installed:
+        installed_units = previous.get('installed_units', ['cairn-proof-daemon.service', 'cairn-proof-runtime.service'])
+    if installed_units not in (['cairn.service', 'cairn-runtime.service'], ['cairn-proof-daemon.service', 'cairn-proof-runtime.service']):
+        raise RuntimeError('unexpected installed unit identities')
+    status['installed_units'] = installed_units
     try:
         save("booting-fresh-linux")
         start_vm()
@@ -220,7 +231,7 @@ def main():
             last = ""
             while time.monotonic() < deadline:
                 try:
-                    last = ssh("systemctl is-active cairn-proof-daemon.service cairn-proof-runtime.service && curl --fail --silent http://127.0.0.1:8089/cgi-bin/notes")
+                    last = ssh("systemctl is-active " + ' '.join(installed_units) + " && curl --fail --silent http://127.0.0.1:8089/cgi-bin/notes")
                     if last == "active\nactive\n" + expected_data:
                         return
                 except Exception as exc:
@@ -247,7 +258,7 @@ def main():
         verify_data()
         status["checks"]["abrupt_vm_shutdown"] = "passed"
         status["limitations"] = "QEMU SIGKILL is an abrupt guest shutdown, not proof against every physical disk or power failure."
-        (out / "guest-journal.log").write_text(ssh("sudo journalctl -u cairn-proof-daemon -u cairn-proof-runtime --no-pager -n 250"))
+        (out / "guest-journal.log").write_text(ssh("sudo journalctl -u " + ' -u '.join(installed_units) + " --no-pager -n 250"))
         save("passed")
     except BaseException as exc:
         status["failure"] = str(exc)
