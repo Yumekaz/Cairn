@@ -15,6 +15,30 @@ import tarfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
+SOURCE_REPOS = ('SERVER', 'DURAFLOW', 'Mini-Docker')
+SOURCE_PATHS = ('.', ':(exclude)validation-runs/**', ':(exclude)verification/**')
+
+
+def source_revision(directory):
+    def git(*arguments):
+        return subprocess.check_output(['git', '-C', str(directory), *arguments], timeout=30)
+    return {'commit': git('rev-parse', 'HEAD').decode().strip(),
+            'working_tree': git('status', '--short', '--untracked-files=all', '--', *SOURCE_PATHS).decode(),
+            'diff_sha256': hashlib.sha256(git('diff', '--binary', 'HEAD', '--', *SOURCE_PATHS)).hexdigest()}
+
+
+def capture_source_inputs(allow_dirty=False):
+    inputs = {repo: source_revision(ROOT.parent / repo) for repo in SOURCE_REPOS}
+    dirty = [repo for repo, item in inputs.items() if item['working_tree']]
+    if dirty and not allow_dirty:
+        raise RuntimeError('final-revision VM proof requires clean source: ' + ', '.join(dirty))
+    return inputs
+
+
+def verify_source_inputs(inputs):
+    for repo, expected in inputs.items():
+        if source_revision(ROOT.parent / repo) != expected:
+            raise RuntimeError('source changed while building/capturing VM inputs: ' + repo)
 
 
 def main():
@@ -29,9 +53,11 @@ def main():
     parser.add_argument("--resume-installed", action="store_true")
     parser.add_argument("--reverify-installed", action="store_true", help="explicitly install final code on a previously passed guest and repeat its recovery proof")
     parser.add_argument("--integration-proof", action="store_true", help="run the complete integration suite inside the disposable guest")
+    parser.add_argument('--allow-dirty', action='store_true', help='Explicit development snapshot only; never final-revision proof')
     args = parser.parse_args()
     if args.integration_proof and args.install_mode != 'verified-binaries':
         parser.error('--integration-proof requires verified-binaries mode')
+    source_inputs = capture_source_inputs(args.allow_dirty)
     image = args.image.resolve()
     manifest = image.parent / "SHA256SUMS"
     expected = next(line.split()[0] for line in manifest.read_text().splitlines()
@@ -58,7 +84,8 @@ def main():
     if args.resume_installed and args.reverify_installed:
         parser.error('choose resume without reinstalling OR explicit final-code reinstallation')
     status = {"state": "preparing", "image_sha256": digest, "started_unix": time.time(),
-              "limits": {"disk_gib": 8, "ram_mib": 2048, "vcpus": 2}, "checks": {}}
+              "limits": {"disk_gib": 8, "ram_mib": 2048, "vcpus": 2}, "checks": {},
+              "release_source_clean": not args.allow_dirty, 'source_inputs': source_inputs}
     def save(phase):
         status["state"] = phase
         status["updated_unix"] = time.time()
@@ -114,14 +141,13 @@ def main():
         wheel_dir=out/f'runtime-wheel-{int(time.time())}'
         run([str(ROOT.parent/'Mini-Docker/venv/bin/python'),'-m','build','--wheel','--no-isolation','--outdir',str(wheel_dir),str(ROOT.parent/'Mini-Docker')],timeout=180)
     with tarfile.open(out / "source.tar", "w") as archive:
-        for repo in ("SERVER", "DURAFLOW", "Mini-Docker"):
+        for repo in SOURCE_REPOS:
             directory = ROOT.parent / repo
             files = subprocess.check_output(["git", "-C", str(directory), "ls-files", "-co", "--exclude-standard", "-z"]).decode().split("\0")
-            revisions[repo] = {"commit": run(["git", "-C", str(directory), "rev-parse", "HEAD"]).strip(),
-                               "working_tree": run(["git", "-C", str(directory), "status", "--short"])}
+            revisions[repo] = dict(source_inputs[repo])
             revisions[repo]['source_files_sha256'] = {}
             for name in dict.fromkeys(files):
-                if not name or name.startswith((".env", ".agents/", ".codex/")):
+                if not name or name.startswith((".env", ".agents/", ".codex/", 'validation-runs/', 'verification/')):
                     continue
                 path = directory / name
                 if path.is_file() and not path.is_symlink():
@@ -151,6 +177,7 @@ def main():
             archive.add(wheel,arcname='SERVER/bin/'+wheel.name,recursive=False)
             archive.add(wheel_manifest,arcname='SERVER/bin/wheel-hashes.json',recursive=False)
             status['installation_mode']='verified-binaries; source build separately tested in GitHub CI'
+    verify_source_inputs(source_inputs)
     (out / "revisions.json").write_text(json.dumps(revisions, indent=2))
     if args.install_mode == 'source':
         goroot = Path(run(["go", "env", "GOROOT"]).strip())
