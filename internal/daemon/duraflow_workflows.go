@@ -819,6 +819,8 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 // --- RESTORE WORKFLOW STEP EXECUTORS ---
 
 func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	input, err := decodeRestoreInput(ctx.InputJSON)
 	if err != nil {
 		return err
@@ -872,6 +874,8 @@ func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 }
 
 func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	input, err := decodeRestoreInput(ctx.InputJSON)
 	if err != nil {
 		return err
@@ -1003,6 +1007,8 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 }
 
 func (s *Server) execRestoreStartContainer(ctx *duraflow.StepContext) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	input, err := decodeRestoreInput(ctx.InputJSON)
 	if err != nil {
 		return err

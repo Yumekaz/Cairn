@@ -325,6 +325,19 @@ func (s *Server) ReconcileServices(ctx context.Context) {
 	if activeIDs, err := s.store.ListActiveDeployIDs(); err == nil && len(activeIDs) > 0 {
 		return
 	}
+	// Restore deliberately leaves the desired-running container stopped between
+	// durable steps. This reservation survives daemon restart; an in-memory flag
+	// (or a lock held by an HTTP request) would not protect recovered workflows.
+	workflows, err := s.store.ListRunningWorkflows()
+	if err != nil {
+		log.Printf("cairnd: cannot verify restore ownership; leaving runtime intact: %v", err)
+		return
+	}
+	for _, workflow := range workflows {
+		if workflow.Type == "restore" {
+			return
+		}
+	}
 
 	services, err := s.store.ListServices()
 	if err != nil {
