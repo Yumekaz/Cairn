@@ -102,3 +102,11 @@ process/status information and private writable shared memory remain available.
 Inspect failures with `journalctl -u cairn -u cairn-runtime`; never publish
 unredacted application secrets. Installation does not reboot the host. A
 disposable VM must separately demonstrate guest boot/reboot/crash recovery.
+
+Offline virtual-environment provisioning normally has a 300-second budget.
+On a slow software-emulated guest, `system_install.py apply --venv-timeout 900`
+sets a bounded setup-only budget (accepted range:60–1800seconds), recorded in
+the installation receipt. It does not extend service readiness, health checks
+or application-test deadlines. A timeout before activation leaves the previous
+services/configuration in place and a partial root-owned release for inspection;
+do not mistake it for a successful installation or delete application data.

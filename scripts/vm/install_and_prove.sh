@@ -64,7 +64,9 @@ else
   python3 scripts/system_install.py prepare --output "$bundle"
 fi
 bundle_digest=$(sha256sum "$bundle/manifest.json" | awk '{print $1}')
-sudo python3 scripts/system_install.py apply --bundle "$bundle" --manifest-sha256 "$bundle_digest"
+# Software emulation can spend >300s in ensurepip. Extend only this explicit
+# offline provisioning step; all application/readiness/test deadlines stay put.
+sudo python3 scripts/system_install.py apply --bundle "$bundle" --manifest-sha256 "$bundle_digest" --venv-timeout 900
 systemctl is-enabled cairn.service cairn-runtime.service
 export MINI_DOCKER_SOCKET=/run/cairn-runtime/mini-docker.sock
 for attempt in $(seq 1 60); do

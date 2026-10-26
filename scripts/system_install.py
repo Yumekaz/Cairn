@@ -28,8 +28,24 @@ MARKER = '# Managed by Cairn system_install.py v1\n'
 UNITS = ('cairn-runtime.service', 'cairn.service')
 
 
-def run(argv, **kwargs):
-    return subprocess.run([str(x) for x in argv], check=True, timeout=300, **kwargs)
+def run(argv, timeout=300, **kwargs):
+    return subprocess.run([str(x) for x in argv], check=True, timeout=timeout, **kwargs)
+
+
+def validate_venv_budget(value):
+    if type(value) is not int or not 60 <= value <= 1800:
+        raise ValueError('venv provisioning timeout must be an integer from 60 to 1800 seconds')
+    return value
+
+
+def install_runtime_wheel(release, wheel, venv_timeout=300):
+    budget = validate_venv_budget(venv_timeout)
+    # Offline setup, not an application health/latency acceptance threshold.
+    # TCG guests may need longer for ensurepip than a native Linux host.
+    run(['/usr/bin/python3', '-I', '-m', 'venv', release / 'venv'],
+        timeout=budget, cwd=release, env=privileged_python_environment())
+    run([release / 'venv/bin/python', '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', release / wheel],
+        cwd=release, env=privileged_python_environment())
 
 
 def sha(path):
@@ -332,6 +348,7 @@ def apply(args):
 def apply_private(args):
     if os.geteuid() != 0:
         raise ValueError('apply requires root')
+    venv_budget = validate_venv_budget(getattr(args, 'venv_timeout', 300))
     # Detect this before creating a partial root-owned release. The required
     # OS package is a deliberate prerequisite, not an implicit network install.
     run(['/usr/bin/python3', '-I', '-c', 'import ensurepip, venv'], cwd='/', env=privileged_python_environment())
@@ -386,8 +403,7 @@ def apply_private(args):
             raise ValueError('invalid bundle artifact name')
         copy_verified(bundle / name, release / name, expected, 0o644 if name.endswith('.whl') else 0o755)
     atomic(release / 'manifest.json', data, 0o644)
-    run(['/usr/bin/python3', '-I', '-m', 'venv', release / 'venv'], cwd=release, env=privileged_python_environment())
-    run([release / 'venv/bin/python', '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', release / wheels[0]], cwd=release, env=privileged_python_environment())
+    install_runtime_wheel(release, wheels[0], venv_budget)
     rootfs = release / 'rootfs'
     for name in ('bin', 'dev', 'proc', 'sys', 'tmp', 'etc'):
         directory = rootfs / name
@@ -446,6 +462,7 @@ def apply_private(args):
         time.sleep(.2)
     receipt = {'release': str(release), 'manifest_sha256': digest, 'owner': account.pw_name,
                'config_backup': str(backup), 'units': list(UNITS), 'applied_unix': time.time(),
+               'venv_timeout_seconds': venv_budget,
                'warning': 'runtime socket group is root-equivalent; no host reboot was performed'}
     atomic(release / 'installation.json', json.dumps(receipt, indent=2).encode(), 0o644)
     print(json.dumps(receipt, indent=2))
@@ -463,6 +480,8 @@ def main():
     install = commands.add_parser('apply')
     install.add_argument('--bundle', type=Path, required=True)
     install.add_argument('--manifest-sha256', required=True)
+    install.add_argument('--venv-timeout', type=int, default=300, metavar='SECONDS',
+                         help='Bound only offline venv/ensurepip provisioning (60..1800, default 300); does not change application-test or readiness deadlines')
     install.add_argument('--prefix', type=Path, default=PREFIX,
                          help='Root-controlled install directory (default /opt/cairn); every existing ancestor must be root-owned and not group/other-writable')
     args = parser.parse_args()

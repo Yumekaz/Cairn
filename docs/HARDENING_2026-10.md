@@ -23,6 +23,15 @@ This milestone does not relabel earlier acceptance as a
 security certification. Historical passes, failures and interruptions retain
 their original revisions and results. **The hardening closeout is not complete.**
 
+The final-runtime guest recheck hit the installer's300-second offline venv
+setup cap under TCG before activating its new package; no final application
+gate passed in that attempt. Its failed status/log remain preserved. The VM
+fixture now selects an explicit900-second venv-only budget, bounded and tested;
+all application/readiness/runtime test deadlines are unchanged. A fresh named
+attempt must still prove the actual setup and every application gate. This
+verification/installer-only change does not change the running controller,
+runtime or notes implementation used by the current native soak.
+
 ## Implementation and retained evidence
 
 Evidence paths below are relative to this checkout unless a repository is named.

@@ -13,6 +13,34 @@ spec.loader.exec_module(installer)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_only_venv_provisioning_gets_an_explicit_slow_host_budget(self):
+        release = Path('/opt/cairn/releases/fixture')
+        with patch.object(installer, 'run') as invoke:
+            installer.install_runtime_wheel(release, 'runtime.whl', 900)
+        first, second = invoke.call_args_list
+        self.assertEqual(first.args[0][:4], ['/usr/bin/python3', '-I', '-m', 'venv'])
+        self.assertEqual(first.kwargs['timeout'], 900)
+        self.assertEqual(set(first.kwargs['env']), {'PATH', 'LANG'})
+        self.assertNotIn('timeout', second.kwargs, 'offline wheel install retains its ordinary default budget')
+        self.assertIn('--no-index', second.args[0])
+        self.assertIn('--no-deps', second.args[0])
+
+    def test_venv_provisioning_budget_is_bounded_before_commands(self):
+        for value in (True, 0, 59, 1801, 900.0, '900'):
+            with self.subTest(value=value), patch.object(installer, 'run') as invoke:
+                with self.assertRaises(ValueError):
+                    installer.install_runtime_wheel(Path('/opt/cairn/releases/fixture'), 'runtime.whl', value)
+                invoke.assert_not_called()
+        with patch.object(installer, 'run') as invoke:
+            installer.install_runtime_wheel(Path('/opt/cairn/releases/fixture'), 'runtime.whl')
+        self.assertEqual(invoke.call_args_list[0].kwargs['timeout'], 300)
+
+    def test_run_uses_the_selected_timeout_without_duplicate_keyword(self):
+        with patch.object(installer.subprocess, 'run') as invoke:
+            installer.run(['/usr/bin/true'], timeout=900, cwd='/')
+        self.assertEqual(invoke.call_args.kwargs['timeout'], 900)
+        self.assertTrue(invoke.call_args.kwargs['check'])
+
     def test_documented_prefix_is_accepted_without_allowing_broad_paths(self):
         self.assertEqual(installer.check_install_prefix('/opt/cairn'), installer.PREFIX)
         self.assertEqual(installer.check_install_prefix('/usr/local/lib/cairn'), Path('/usr/local/lib/cairn'))
