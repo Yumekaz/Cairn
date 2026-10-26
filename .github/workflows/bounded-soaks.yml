@@ -1,0 +1,184 @@
+name: bounded-soaks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/hosted-soaks-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounded-soaks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance-session:
+    name: session-${{ matrix.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - profile: baseline
+            interval: 15
+            reads: 3
+            port: 8098
+          - profile: higher-rate
+            interval: 5
+            reads: 9
+            port: 8099
+    env:
+      PROFILE: ${{ matrix.profile }}
+      SESSION: validation-runs/hosted-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+      MINI_DOCKER_SOCKET: /run/cairn-runtime/mini-docker.sock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: SERVER
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Mini-Docker
+          ref: bf1f63f44f09f90e0209a74e1eed1a5da88bdb1a
+          path: Mini-Docker
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/DURAFLOW
+          ref: 4a83027c623746f9e541423dcc37781fec1c137b
+          path: DURAFLOW
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/FAILFORGE
+          ref: c7dd846c304f6994737a18750abc829aad6b6ffb
+          path: FAILFORGE
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Mini-Redis-Cassandra
+          ref: 12fae5025421026cbe06b042a823719bee5c27cc
+          path: Mini-Redis-Cassandra
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Coordination-service
+          ref: 6c2026d840985f7084cfc81bebe7c12f924676a0
+          path: Coordination-service
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: SERVER/go.mod
+      - name: Prepare isolated hosted runner prerequisites
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux ]]
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv busybox-static iproute2 iptables
+          python3 -m venv Mini-Docker/venv
+          Mini-Docker/venv/bin/pip install build setuptools wheel
+          mkdir -p Mini-Docker/rootfs/bin
+          cp /usr/bin/busybox Mini-Docker/rootfs/bin/busybox
+      - name: Install and prove the actual packaged system services
+        working-directory: SERVER
+        run: |
+          set -euo pipefail
+          mkdir -p bin verification validation-runs
+          go build -o bin/cairn ./cmd/cairn
+          bin/cairn init
+          chmod 700 "$HOME/.cairn"
+          python3 scripts/system_install.py prepare --output "$PWD/verification/bundle" > verification/prepare.log 2>&1
+          digest=$(sha256sum verification/bundle/manifest.json | awk '{print $1}')
+          sudo python3 scripts/system_install.py apply --bundle "$PWD/verification/bundle" --manifest-sha256 "$digest" --prefix /usr/local/lib/cairn > verification/install.log 2>&1
+          python3 scripts/verify_installed_admin.py > verification/admin.jsonl
+          systemctl is-enabled cairn.service cairn-runtime.service > verification/boot-enabled.txt
+          EXPECTED_MANIFEST_SHA256="$digest" python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          names = ('SERVER','Mini-Docker','DURAFLOW','FAILFORGE','Mini-Redis-Cassandra','Coordination-service')
+          revisions = {}
+          for name in names:
+              repo = pathlib.Path.cwd().parent / name
+              assert subprocess.check_output(['git','-C',str(repo),'status','--short'],text=True) == '', name
+              revisions[name] = subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+          pathlib.Path('verification/expected-revisions.json').write_text(json.dumps(revisions,indent=2))
+          digest = os.environ['EXPECTED_MANIFEST_SHA256']
+          release = pathlib.Path('/usr/local/lib/cairn/releases') / digest[:20]
+          receipt = json.loads((release/'installation.json').read_text())
+          assert receipt['manifest_sha256'] == digest and receipt['release'] == str(release)
+          assert hashlib.sha256((release/'manifest.json').read_bytes()).hexdigest() == digest
+          with open(os.environ['GITHUB_ENV'],'a') as output:
+              output.write('CAIRN_ROOTFS=' + str(release/'rootfs') + '\n')
+              output.write('CAIRN_SOCKET=' + str(pathlib.Path.home()/'.cairn/cairnd.sock') + '\n')
+          PY
+      - name: Run one independently recorded two-hour session
+        working-directory: SERVER
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --signal=TERM --kill-after=10s 7900s python3 scripts/notes_soak.py \
+            --output "$PWD/$SESSION" --port '${{ matrix.port }}' --duration-seconds 7200 \
+            --interval-seconds '${{ matrix.interval }}' --reads-per-sample '${{ matrix.reads }}' \
+            --runtime-socket "$MINI_DOCKER_SOCKET" --daemon-unit cairn.service --daemon-scope system \
+            > "$SESSION.log" 2>&1
+          session_exit=$?
+          set -e
+          printf '%s\n' "$session_exit" > "$SESSION.exit-status"
+          [[ "$session_exit" == 0 ]]
+          python3 scripts/verify_soak_session.py --status "$SESSION/status.json" \
+            --expected-revisions verification/expected-revisions.json > "$SESSION.verified.json"
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, sys
+          sys.path.insert(0,'scripts')
+          import notes_smoke as notes
+          status = json.loads(pathlib.Path(os.environ['SESSION'],'status.json').read_text())
+          name = status['fixture']['service']
+          service = notes.api('GET','/services/'+name)
+          assert service['desired_state'] == 'stopped', 'fixture still admitted to run'
+          runtime = json.loads(subprocess.check_output([
+              'curl','--fail','--silent','--show-error','--unix-socket',os.environ['MINI_DOCKER_SOCKET'],
+              'http://localhost/containers/'+service['runtime_id']+'/json'],text=True,timeout=10))
+          assert runtime['status'] == 'stopped' and not runtime['pid'], 'owned workload did not stop'
+          pathlib.Path('verification/fixture-cleanup.json').write_text(json.dumps({
+              'result':'passed','service':name,'desired_state':service['desired_state'],
+              'runtime_id':service['runtime_id'],'runtime_status':runtime['status'],'pid':runtime['pid']},indent=2))
+          PY
+      - name: Stop only the marked disposable installation
+        if: always()
+        working-directory: SERVER
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          for unit in cairn.service cairn-runtime.service; do
+            fragment=$(systemctl show "$unit" -p FragmentPath --value)
+            if [[ -n "$fragment" ]]; then
+              grep -Fxq '# Managed by Cairn system_install.py v1' "$fragment"
+              sudo systemctl disable --now "$unit"
+              [[ "$(systemctl show "$unit" -p ActiveState --value)" == inactive ]]
+              [[ "$(systemctl show "$unit" -p MainPID --value)" == 0 ]]
+            fi
+          done
+          printf 'passed\n' > verification/cleanup.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cairn-soak-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            SERVER/validation-runs/hosted-*/status.json
+            SERVER/validation-runs/hosted-*/samples.jsonl
+            SERVER/validation-runs/hosted-*/revisions.json
+            SERVER/validation-runs/hosted-*/fixture.json
+            SERVER/validation-runs/hosted-*.log
+            SERVER/validation-runs/hosted-*.exit-status
+            SERVER/validation-runs/hosted-*.verified.json
+            SERVER/verification/*.log
+            SERVER/verification/admin.jsonl
+            SERVER/verification/boot-enabled.txt
+            SERVER/verification/expected-revisions.json
+            SERVER/verification/fixture-cleanup.json
+            SERVER/verification/cleanup.txt

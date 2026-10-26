@@ -14,7 +14,7 @@ finalization. It neither disables writeback nor lengthens acceptance deadlines.
 Seven regression cases, 171 ordinary-user cases, all 16 privileged cases and an
 actual detached rootless Stop passed locally; the original six regressions
 failed before the repair. A separate coding-agent review found no blocking
-FD/security issue, but is not professional certification. Runtime head
+FD/security issue, but is not professional certification. Previous runtime head
 `141b4cc` changes only public documentation after that repair. Two independent
 exact-commit GitHub privileged workflows passed, each including all 16 cases
 and ten additional untraced lifecycle repetitions. The final runtime's native
@@ -43,6 +43,51 @@ owned child process. Failed evidence writes cannot bypass cleanup or turn
 an ambiguous terminal write into a successful owner exit. All 126 verification
 runner regressions passed locally, including controlled child-process signal
 delivery; the final guest still requires its own real result.
+
+The subsequently completed guest integration attempt on `7ab7d11`/`141b4cc`
+executed all nine cases but failed the PostgreSQL task-adapter restore: the
+runtime reported a stopped task without its exit code. The other eight cases
+passed. This is retained as a failed gate, not dismissed as flaky.
+
+The metadata race is now deterministically reproduced: nine cases fail on
+`141b4cc`, including lost completion codes 0/7/137 and overwritten newer process
+generations. Repair `bf1f63f` compares the original snapshot with a freshly read
+record under the supervisor's same exclusive file lock before committing a
+liveness refresh. A concurrent record wins in full; deleted metadata is not
+recreated, and missing exit codes never become guessed success. The repaired
+runtime passed 183 ordinary-user cases, all 16 privileged cases without skips,
+and an actual rootless Start/readiness/Stop proof within one live owner. The
+earlier incomplete rootless-owner attempt remains unaccepted evidence. Style
+and fatal lint passed; Bandit reported no medium/high findings. Exact-commit
+CI, new installation/recovery, guest replay and hosted sessions still need
+their own results. Evidence: Mini-Docker's
+`validation-runs/metadata-refresh-race-20261026/` and this repository's
+`validation-runs/metadata-refresh-root-20261026.{log,xml}`.
+
+Because local power cannot be guaranteed, the user approved running the two
+timed gates on independent standard GitHub-hosted Linux runners. The unfinished
+local attempt was explicitly stopped and retained without duration credit.
+The opt-in hosted workflow is not a replacement for the local guest's recovery
+proof, and neither hosted session counts before its full result exists.
+
+The opt-in `bounded-soaks` workflow uses two independent standard Ubuntu
+runners and fixed two-hour targets. It runs only when manually requested or
+when an acceptance branch matching `codex/hosted-soaks-*` is deliberately
+pushed. Normal main pushes keep ordinary CI. Each session must pass the full
+retained-sample validator, exact six-repository source checks, zero unexpected
+restart checks, actual backend fixture-stop verification and marked-unit
+cleanup. Only allowlisted non-secret evidence is uploaded. Failed attempts
+retain unique run/attempt artifacts; there are no automatic retries.
+
+For release checking, run the following with a new output directory each time:
+
+```sh
+python3 scripts/github_ci_snapshot.py --require-hosted-soaks --output validation-runs/github-release-final
+```
+
+This mode remains non-green when the exact
+Cairn commit lacks a completed successful hosted workflow. Ordinary CI-only
+reports explicitly do not close the separate acceptance gates.
 
 ## Implementation and retained evidence
 

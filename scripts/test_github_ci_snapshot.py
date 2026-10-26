@@ -11,6 +11,33 @@ import github_ci_snapshot as ci
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_release_mode_cannot_pass_with_missing_pending_or_failed_hosted_soaks(self):
+        for state in ('missing','in_progress','failure','success'):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temporary:
+                output=Path(temporary)/'report'
+                def fetch(request):
+                    repo=request.full_url.split('/repos/Yumekaz/')[1].split('/')[0]
+                    names=next(required for _,remote,required in ci.PROJECTS if remote==repo)
+                    runs=[{'id':index+1,'name':name,'head_sha':'a'*40,'status':'completed',
+                           'conclusion':'success','html_url':'https://github.com/fixture'}
+                          for index,name in enumerate(names)]
+                    if repo=='Cairn' and state!='missing':
+                        runs.append({'id':99,'name':'bounded-soaks','head_sha':'a'*40,
+                                     'status':'in_progress' if state=='in_progress' else 'completed',
+                                     'conclusion':None if state=='in_progress' else state,
+                                     'html_url':'https://github.com/fixture-soak'})
+                    return {'workflow_runs':runs}
+                with patch('sys.argv',['snapshot','--require-hosted-soaks','--output',str(output)]), \
+                     patch.object(ci.subprocess,'check_output',return_value='a'*40), \
+                     patch.object(ci,'fetch_runs',side_effect=fetch):
+                    with self.assertRaises(SystemExit) as result:
+                        ci.main()
+                self.assertEqual(result.exception.code,0 if state=='success' else 1)
+                report=json.loads((output/'report.json').read_text())
+                self.assertEqual(report['all_exact_commit_checks_passed'],state=='success')
+                self.assertTrue(report['hosted_soaks_required'])
+        self.assertEqual(ci.PROJECTS[0][2],{'smoke'},'release mode must not mutate ordinary CI requirements')
+
     def test_transient_timeouts_are_bounded_and_retried(self):
         calls, pauses = [], []
         def open_response(request, timeout):

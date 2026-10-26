@@ -34,11 +34,17 @@ def fetch_runs(request, opener=urllib.request.urlopen, pause=time.sleep):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--require-hosted-soaks',action='store_true',
+                        help='release gate: require completed bounded-soaks as well as ordinary CI on this exact Cairn commit')
     args=parser.parse_args()
     args.output.mkdir(parents=True,exist_ok=False)
-    report={'checked_utc':datetime.now(timezone.utc).isoformat(),'repositories':[]}
+    report={'checked_utc':datetime.now(timezone.utc).isoformat(),'repositories':[],
+            'hosted_soaks_required':args.require_hosted_soaks}
     complete=True
     for local,remote,required in PROJECTS:
+        required=set(required)
+        if remote=='Cairn' and args.require_hosted_soaks:
+            required.add('bounded-soaks')
         directory=ROOT.parent/local
         commit=subprocess.check_output(['git','-C',str(directory),'rev-parse','HEAD'],text=True).strip()
         url=f'https://api.github.com/repos/Yumekaz/{remote}/actions/runs?head_sha={commit}&per_page=100'
@@ -65,7 +71,8 @@ def main():
         (args.output/'report.json').write_text(json.dumps(report,indent=2))
     report['all_exact_commit_checks_passed']=complete
     (args.output/'report.json').write_text(json.dumps(report,indent=2))
-    lines=['# Exact-commit GitHub Actions checks','','| Repository | Commit | Result | Checks |','| --- | --- | --- | --- |']
+    scope='Ordinary CI plus the required hosted soak gate.' if args.require_hosted_soaks else 'Ordinary CI only; this report does not close separate acceptance gates.'
+    lines=['# Exact-commit GitHub Actions checks','',scope,'','| Repository | Commit | Result | Checks |','| --- | --- | --- | --- |']
     for item in report['repositories']:
         links=', '.join(f'[{r["name"]}]({r["html_url"]})' for r in item['runs'])
         lines.append(f'| {item["repository"]} | `{item["commit"]}` | {item["result"]} | {links or "missing"} |')
