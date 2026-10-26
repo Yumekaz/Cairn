@@ -1,6 +1,12 @@
 # Hardening follow-up — October 2026
 
-Updated 26 October. This milestone does not relabel earlier acceptance as a
+Updated 26 October. Runtime test-only follow-up `b3628db` adds ten mandatory
+untraced CI repetitions and identity-checked supervisor failure snapshots; its
+new exact checks must complete. Twenty separate local rootexec repetitions
+passed with unchanged deadlines. The traced diagnostic's delayed exit is not
+proof of the original untraced timeout's cause.
+
+This milestone does not relabel earlier acceptance as a
 security certification. Historical passes, failures and interruptions retain
 their original revisions and results. **The hardening closeout is not complete.**
 
