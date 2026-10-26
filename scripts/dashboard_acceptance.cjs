@@ -172,7 +172,6 @@ async function check(name, action) {
       const origin = await page.evaluate(() => performance.timeOrigin);
       await context.setOffline(true); await visible('global-banner'); await disabled('btn-confirm-proceed');
       assert.equal(await page.locator('#chk-confirm-understand').isChecked(), true);
-      await page.locator('#btn-retry-connection').click(); await disabled('btn-confirm-proceed');
       await context.setOffline(false); await connected(); await visible('modal-confirm-action');
       assert.equal(await page.locator('#chk-confirm-understand').isChecked(), true); await enabled('btn-confirm-proceed');
       assert.equal(await page.evaluate(() => performance.timeOrigin), origin, 'reconnect must not reload the page');
@@ -181,6 +180,15 @@ async function check(name, action) {
     await check('Confirmed Restore recovers the selected snapshot bytes', async () => {
       await page.locator('#btn-confirm-proceed').click(); await hidden('modal-confirm-action');
       await expectData('first\n');
+    });
+    await check('Offline Retry is usable outside the confirmation dialog', async () => {
+      const origin = await page.evaluate(() => performance.timeOrigin);
+      await context.setOffline(true); await visible('global-banner');
+      await disabled('btn-create-backup');
+      await page.locator('#btn-retry-connection').click();
+      await visible('global-banner'); await disabled('btn-create-backup');
+      await context.setOffline(false); await connected(); await enabled('btn-create-backup');
+      assert.equal(await page.evaluate(() => performance.timeOrigin), origin);
     });
     await check('Rollback selects the intended release without undoing data', async () => {
       await inspect();
