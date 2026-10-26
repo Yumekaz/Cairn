@@ -1,5 +1,7 @@
 import copy
 from pathlib import Path
+import re
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +9,17 @@ import verify_soak_session as verifier
 
 
 class CompletedSessionTests(unittest.TestCase):
+    def test_hosted_bootstrap_evidence_is_already_ignored_without_weakening_source_checks(self):
+        root=Path(__file__).resolve().parent.parent
+        text=(root/'.github/workflows/bounded-soaks.yml').read_text()
+        value=re.search(r'^\s+BOOTSTRAP:\s+(.+)$',text,re.MULTILINE).group(1)
+        path=re.sub(r'\$\{\{.*?\}\}','fixture',value)+'/prepare.log'
+        self.assertTrue(path.startswith('validation-runs/'))
+        self.assertNotIn('verification/',text)
+        result=subprocess.run(['git','check-ignore','--no-index','--quiet','--',path],cwd=root)
+        self.assertEqual(result.returncode,0,'bootstrap evidence must not dirty the raw source snapshot')
+        self.assertIn("'status','--short'",text)
+
     def setUp(self):
         self.path = Path('/owned/session/status.json')
         self.expected = {name: 'a' * 40 for name in verifier.PROJECTS}

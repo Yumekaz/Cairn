@@ -33,6 +33,7 @@ jobs:
     env:
       PROFILE: ${{ matrix.profile }}
       SESSION: validation-runs/hosted-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+      BOOTSTRAP: validation-runs/hosted-bootstrap-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
       MINI_DOCKER_SOCKET: /run/cairn-runtime/mini-docker.sock
     steps:
       - uses: actions/checkout@v4
@@ -87,15 +88,15 @@ jobs:
         working-directory: SERVER
         run: |
           set -euo pipefail
-          mkdir -p bin verification validation-runs
+          mkdir -p bin "$BOOTSTRAP" validation-runs
           go build -o bin/cairn ./cmd/cairn
           bin/cairn init
           chmod 700 "$HOME/.cairn"
-          python3 scripts/system_install.py prepare --output "$PWD/verification/bundle" > verification/prepare.log 2>&1
-          digest=$(sha256sum verification/bundle/manifest.json | awk '{print $1}')
-          sudo python3 scripts/system_install.py apply --bundle "$PWD/verification/bundle" --manifest-sha256 "$digest" --prefix /usr/local/lib/cairn > verification/install.log 2>&1
-          python3 scripts/verify_installed_admin.py > verification/admin.jsonl
-          systemctl is-enabled cairn.service cairn-runtime.service > verification/boot-enabled.txt
+          python3 scripts/system_install.py prepare --output "$PWD/$BOOTSTRAP/bundle" > "$BOOTSTRAP/prepare.log" 2>&1
+          digest=$(sha256sum "$BOOTSTRAP/bundle/manifest.json" | awk '{print $1}')
+          sudo python3 scripts/system_install.py apply --bundle "$PWD/$BOOTSTRAP/bundle" --manifest-sha256 "$digest" --prefix /usr/local/lib/cairn > "$BOOTSTRAP/install.log" 2>&1
+          python3 scripts/verify_installed_admin.py > "$BOOTSTRAP/admin.jsonl"
+          systemctl is-enabled cairn.service cairn-runtime.service > "$BOOTSTRAP/boot-enabled.txt"
           EXPECTED_MANIFEST_SHA256="$digest" python3 - <<'PY'
           import hashlib, json, os, pathlib, subprocess
           names = ('SERVER','Mini-Docker','DURAFLOW','FAILFORGE','Mini-Redis-Cassandra','Coordination-service')
@@ -104,7 +105,7 @@ jobs:
               repo = pathlib.Path.cwd().parent / name
               assert subprocess.check_output(['git','-C',str(repo),'status','--short'],text=True) == '', name
               revisions[name] = subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
-          pathlib.Path('verification/expected-revisions.json').write_text(json.dumps(revisions,indent=2))
+          pathlib.Path(os.environ['BOOTSTRAP'],'expected-revisions.json').write_text(json.dumps(revisions,indent=2))
           digest = os.environ['EXPECTED_MANIFEST_SHA256']
           release = pathlib.Path('/usr/local/lib/cairn/releases') / digest[:20]
           receipt = json.loads((release/'installation.json').read_text())
@@ -129,7 +130,7 @@ jobs:
           printf '%s\n' "$session_exit" > "$SESSION.exit-status"
           [[ "$session_exit" == 0 ]]
           python3 scripts/verify_soak_session.py --status "$SESSION/status.json" \
-            --expected-revisions verification/expected-revisions.json > "$SESSION.verified.json"
+            --expected-revisions "$BOOTSTRAP/expected-revisions.json" > "$SESSION.verified.json"
           python3 - <<'PY'
           import json, os, pathlib, subprocess, sys
           sys.path.insert(0,'scripts')
@@ -142,7 +143,7 @@ jobs:
               'curl','--fail','--silent','--show-error','--unix-socket',os.environ['MINI_DOCKER_SOCKET'],
               'http://localhost/containers/'+service['runtime_id']+'/json'],text=True,timeout=10))
           assert runtime['status'] == 'stopped' and not runtime['pid'], 'owned workload did not stop'
-          pathlib.Path('verification/fixture-cleanup.json').write_text(json.dumps({
+          pathlib.Path(os.environ['BOOTSTRAP'],'fixture-cleanup.json').write_text(json.dumps({
               'result':'passed','service':name,'desired_state':service['desired_state'],
               'runtime_id':service['runtime_id'],'runtime_status':runtime['status'],'pid':runtime['pid']},indent=2))
           PY
@@ -151,7 +152,7 @@ jobs:
         working-directory: SERVER
         run: |
           set -euo pipefail
-          mkdir -p verification
+          mkdir -p "$BOOTSTRAP"
           for unit in cairn.service cairn-runtime.service; do
             fragment=$(systemctl show "$unit" -p FragmentPath --value)
             if [[ -n "$fragment" ]]; then
@@ -161,7 +162,7 @@ jobs:
               [[ "$(systemctl show "$unit" -p MainPID --value)" == 0 ]]
             fi
           done
-          printf 'passed\n' > verification/cleanup.txt
+          printf 'passed\n' > "$BOOTSTRAP/cleanup.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -176,9 +177,10 @@ jobs:
             SERVER/validation-runs/hosted-*.log
             SERVER/validation-runs/hosted-*.exit-status
             SERVER/validation-runs/hosted-*.verified.json
-            SERVER/verification/*.log
-            SERVER/verification/admin.jsonl
-            SERVER/verification/boot-enabled.txt
-            SERVER/verification/expected-revisions.json
-            SERVER/verification/fixture-cleanup.json
-            SERVER/verification/cleanup.txt
+            SERVER/validation-runs/hosted-*/prepare.log
+            SERVER/validation-runs/hosted-*/install.log
+            SERVER/validation-runs/hosted-*/admin.jsonl
+            SERVER/validation-runs/hosted-*/boot-enabled.txt
+            SERVER/validation-runs/hosted-*/expected-revisions.json
+            SERVER/validation-runs/hosted-*/fixture-cleanup.json
+            SERVER/validation-runs/hosted-*/cleanup.txt
