@@ -32,6 +32,12 @@ function request(method, route, body, application = false) {
     const settings = application
       ? { hostname: '127.0.0.1', port, path: '/cgi-bin/notes', method }
       : { socketPath: path.join(os.homedir(), '.cairn/cairnd.sock'), path: route, method };
+    if (body !== undefined) {
+      // BusyBox CGI requires CONTENT_LENGTH; Node otherwise sends a chunked
+      // write that the notes endpoint correctly rejects as an invalid request.
+      settings.headers = { 'Content-Length': Buffer.byteLength(body),
+        'Content-Type': application ? 'text/plain; charset=utf-8' : 'application/json' };
+    }
     const call = http.request(settings, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));

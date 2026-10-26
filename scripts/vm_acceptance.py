@@ -17,6 +17,123 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_REPOS = ('SERVER', 'DURAFLOW', 'Mini-Docker')
 SOURCE_PATHS = ('.', ':(exclude)validation-runs/**', ':(exclude)verification/**')
+STATIC_NETWORK = {
+    'id': 'private-static-v1', 'net': '10.0.2.0/24', 'host': '10.0.2.2',
+    'dns': '10.0.2.3', 'guest': '10.0.2.15', 'prefix': 24,
+    'mac': '52:54:00:ca:17:01', 'dhcp4': False, 'dhcp6': False,
+    'accept_ra': False, 'ipv6': False,
+}
+LEGACY_NETWORK = {'id': 'legacy-default-usernet-v0',
+                  'addressing': 'original seed and QEMU defaults retained; not a static-network proof'}
+
+
+def select_network_profile(previous=None):
+    """Never retrofit the fresh static NIC/MAC onto an old DHCP seed."""
+    if previous is None:
+        return dict(STATIC_NETWORK)
+    recorded = previous.get('network_profile')
+    if recorded is None:
+        return dict(LEGACY_NETWORK)
+    if not isinstance(recorded, dict):
+        raise RuntimeError('invalid recorded VM network profile')
+    profiles = {item['id']: item for item in (STATIC_NETWORK, LEGACY_NETWORK)}
+    expected = profiles.get(recorded.get('id'))
+    if expected is None or any(recorded.get(key) != value for key, value in expected.items()):
+        raise RuntimeError('unknown or changed VM network profile; use a fresh fixture')
+    return dict(recorded)
+
+
+def network_arguments(profile, ssh_port):
+    if type(ssh_port) is not int or not 1 <= ssh_port <= 65535:
+        raise ValueError('SSH forwarding port must be between 1 and 65535')
+    profile = select_network_profile({'network_profile': profile})
+    if profile['id'] == LEGACY_NETWORK['id']:
+        # Byte-for-byte original networking: even adding a MAC would change
+        # the old guest's NIC identity and could break historical resumes.
+        backend = f'user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22'
+        device = 'virtio-net-pci,netdev=net0'
+    else:
+        backend = (f"user,id=net0,ipv4=on,net={profile['net']},host={profile['host']},"
+                   f"dns={profile['dns']},ipv6=off,"
+                   f"hostfwd=tcp:127.0.0.1:{ssh_port}-{profile['guest']}:22")
+        device = f"virtio-net-pci,netdev=net0,mac={profile['mac']}"
+    return ['-netdev', backend, '-device', device]
+
+
+def render_user_data(public_key, install_mode):
+    if install_mode not in ('source', 'verified-binaries'):
+        raise ValueError('unknown guest installation mode')
+    if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: [^\r\n]*)?', public_key):
+        raise ValueError('expected one generated ed25519 guest public key')
+    compiler_packages = '  - git\n  - build-essential' if install_mode == 'source' else ''
+    return ((ROOT / 'scripts/vm/user-data.yaml').read_text()
+            .replace('@SSH_KEY@', json.dumps(public_key))
+            .replace('@SOURCE_PACKAGES@', compiler_packages))
+
+
+def render_network_config():
+    text = (ROOT / 'scripts/vm/network-config.yaml').read_text()
+    for key in ('mac', 'guest', 'prefix', 'host', 'dns'):
+        text = text.replace('@' + key.upper() + '@', str(STATIC_NETWORK[key]))
+    if re.search(r'@[A-Z_]+@', text):
+        raise RuntimeError('unresolved VM network seed setting')
+    return text
+
+
+def file_sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def prepare_seed(out, public_key, install_mode, run):
+    """Fresh fixtures only. Resume must never call this or rewrite seed files."""
+    (out / 'user-data').write_text(render_user_data(public_key, install_mode))
+    (out / 'meta-data').write_text('instance-id: cairn-acceptance-vm\nlocal-hostname: cairn-acceptance-vm\n')
+    (out / 'network-config').write_text(render_network_config())
+    run(['cloud-localds', '-N', str(out / 'network-config'), str(out / 'seed.img'),
+         str(out / 'user-data'), str(out / 'meta-data')])
+    profile = select_network_profile()
+    profile['seed_files_sha256'] = {
+        name: file_sha256(out / name)
+        for name in ('user-data', 'meta-data', 'network-config', 'seed.img')
+    }
+    return profile
+
+
+def resume_network_profile(out, previous):
+    profile = select_network_profile(previous)
+    if profile['id'] == STATIC_NETWORK['id']:
+        expected = profile.get('seed_files_sha256', {})
+        if set(expected) != {'user-data', 'meta-data', 'network-config', 'seed.img'}:
+            raise RuntimeError('static-network resume requires its original recorded seed files')
+        for name, digest in expected.items():
+            if file_sha256(out / name) != digest:
+                raise RuntimeError('VM seed changed; refusing network retrofit on resume: ' + name)
+    else:
+        # Sidecar user-data from historical retries may not match the ISO.
+        # Pin only the actual old seed, not today's templates or assumptions.
+        digest = file_sha256(out / 'seed.img')
+        expected = profile.get('seed_sha256', digest)
+        if digest != expected:
+            raise RuntimeError('legacy VM seed changed since previous resume')
+        profile['seed_sha256'] = digest
+    return profile
+
+
+def prelaunch_inventory():
+    """Read-only host inventory immediately before EACH owned QEMU launch."""
+    pid1 = Path('/proc/1/comm').read_text().strip()
+    if pid1 not in ('systemd', 'init'):
+        raise RuntimeError('cannot verify host VM inventory from this PID namespace; run on the host')
+    output = subprocess.check_output(['ps', '-eo', 'pid=,comm=,args='], text=True, timeout=15)
+    active = []
+    for line in output.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) >= 2 and (fields[1].startswith('qemu-system') or fields[1] == 'qemu-kvm'):
+            active.append(line.strip())
+    if active:
+        raise RuntimeError('existing QEMU process found; inspect/stop its owner before launching another VM: ' + '; '.join(active))
+    return {'checked_unix': time.time(), 'pid1': pid1, 'active_qemu': active}
 
 
 def source_revision(directory):
@@ -57,12 +174,14 @@ def main():
     args = parser.parse_args()
     if args.integration_proof and args.install_mode != 'verified-binaries':
         parser.error('--integration-proof requires verified-binaries mode')
+    if not 1 <= args.ssh_port <= 65535:
+        parser.error('--ssh-port must be between 1 and 65535')
     source_inputs = capture_source_inputs(args.allow_dirty)
     image = args.image.resolve()
     manifest = image.parent / "SHA256SUMS"
     expected = next(line.split()[0] for line in manifest.read_text().splitlines()
                     if line.split()[-1].lstrip("*") == image.name)
-    digest = hashlib.file_digest(image.open("rb"), "sha256").hexdigest()
+    digest = file_sha256(image)
     if digest != expected:
         raise RuntimeError("official cloud-image checksum does not match")
     with socket.socket() as probe:
@@ -79,13 +198,16 @@ def main():
     else:
         args.output.mkdir(parents=True, exist_ok=False)
     out = args.output.resolve()
+    network_profile = resume_network_profile(out, previous) if args.resume else select_network_profile()
     if (args.resume_installed or args.reverify_installed) and not args.resume:
         parser.error('installed-state options require --resume')
     if args.resume_installed and args.reverify_installed:
         parser.error('choose resume without reinstalling OR explicit final-code reinstallation')
     status = {"state": "preparing", "image_sha256": digest, "started_unix": time.time(),
               "limits": {"disk_gib": 8, "ram_mib": 2048, "vcpus": 2}, "checks": {},
-              "release_source_clean": not args.allow_dirty, 'source_inputs': source_inputs}
+              "release_source_clean": not args.allow_dirty, 'source_inputs': source_inputs,
+              'network_profile': network_profile, 'ssh_forward': {
+                  'host': '127.0.0.1', 'port': args.ssh_port, 'guest_port': 22}}
     def save(phase):
         status["state"] = phase
         status["updated_unix"] = time.time()
@@ -121,17 +243,16 @@ def main():
         return result.stdout
     if not args.resume:
         run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(out / "guest-key")])
-    public_key = (out / "guest-key.pub").read_text().strip()
-    user_data = (ROOT / "scripts/vm/user-data.yaml").read_text().replace("@SSH_KEY@", public_key)
-    (out / "user-data").write_text(user_data)
-    (out / "meta-data").write_text("instance-id: cairn-acceptance-vm\nlocal-hostname: cairn-acceptance-vm\n")
     if not args.resume:
-        run(["cloud-localds", str(out / "seed.img"), str(out / "user-data"), str(out / "meta-data")])
+        public_key = (out / 'guest-key.pub').read_text().strip()
+        status['network_profile'] = prepare_seed(out, public_key, args.install_mode, run)
         run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(image), str(out / "disk.qcow2"), "8G"])
     elif (out/'source.tar').exists():
         stamp=str(int(time.time()))
         (out/'source.tar').rename(out/f'source-before-resume-{stamp}.tar')
         (out/'revisions.json').rename(out/f'revisions-before-resume-{stamp}.json')
+    # Preserve the seed/profile provenance even if later source capture fails.
+    save('preparing')
     revisions = {}
     if args.install_mode=='verified-binaries':
         for binary in ('cairn','cairnd'):
@@ -191,10 +312,11 @@ def main():
     serial = (out / "serial.log").open("ab")
     def start_vm():
         nonlocal process
+        status.setdefault('prelaunch_inventory', []).append(prelaunch_inventory())
         process = subprocess.Popen(["qemu-system-x86_64", "-accel", "tcg,thread=multi", "-cpu", "max", "-smp", "2", "-m", "2048",
             "-drive", f"file={out / 'disk.qcow2'},format=qcow2,if=virtio,cache=none",
             "-drive", f"file={out / 'seed.img'},format=raw,if=virtio,readonly=on",
-            "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{args.ssh_port}-:22", "-device", "virtio-net-pci,netdev=net0",
+            *network_arguments(status['network_profile'], args.ssh_port),
             "-display", "none", "-serial", "stdio", "-monitor", "none"], stdout=serial, stderr=serial)
         (out / "qemu.pid").write_text(str(process.pid))
     def ready(previous_boot=None):
