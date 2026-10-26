@@ -79,7 +79,7 @@ var inspectCmd = &cobra.Command{
 
 var startCmd = &cobra.Command{
 	Use:   "start [service_name]",
-	Short: "Start a stopped service container",
+	Short: "Start a service container or resume its existing cron schedule",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -99,7 +99,8 @@ var startCmd = &cobra.Command{
 
 var stopCmd = &cobra.Command{
 	Use:   "stop [service_name]",
-	Short: "Stop a running service container",
+	Short: "Stop a service container or pause future cron runs",
+	Long:  "Stop a service container. For cron services, pause future runs; already-running jobs continue.",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -119,7 +120,7 @@ var stopCmd = &cobra.Command{
 
 var restartCmd = &cobra.Command{
 	Use:   "restart [service_name]",
-	Short: "Restart a running service container",
+	Short: "Restart a service container or reactivate its existing cron schedule",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]

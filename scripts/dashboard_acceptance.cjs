@@ -69,7 +69,7 @@ const expectData = text => eventually(async () => assert.equal(await journal(), 
 async function check(name, action) {
   const record = { name, state: 'running', started: new Date().toISOString() };
   results.checks.push(record); save();
-  try { await action(); record.state = 'passed'; }
+  try { const evidence = await action(); if (evidence !== undefined) record.evidence = evidence; record.state = 'passed'; }
   catch (error) { record.state = 'failed'; record.error = scrub(error.message); throw error; }
   finally { record.ended = new Date().toISOString(); save(); }
 }
@@ -91,6 +91,34 @@ async function check(name, action) {
     const disabled = id => page.waitForFunction(id => document.getElementById(id).disabled, id);
     const connected = () => page.waitForFunction(() => document.getElementById('daemon-connection-text').textContent.trim() === 'Connected');
     const hidden = id => page.locator('#' + id).waitFor({ state: 'hidden' });
+    const deploys = () => request('GET', `/services/${fixture.service}/deploys`);
+    function configFor(id) {
+      assert.match(id, /^[0-9a-f-]{36}$/);
+      const file = path.join(os.homedir(), '.cairn/services', fixture.service, `deploy_${id}.json`);
+      assert(!fs.lstatSync(file).isSymbolicLink());
+      const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.equal(cfg.name, fixture.service);
+      assert.deepEqual(cfg.volumes.map(item => item.name).sort(), [fixture.service + '-code', fixture.data_volume].sort());
+      assert.deepEqual(cfg.ports, [{ host: port, container: 80 }]);
+      return cfg;
+    }
+    const rollbackReply = () => page.waitForResponse(response =>
+      new URL(response.url()).pathname === `/services/${fixture.service}/rollback`
+      && response.request().method() === 'POST', { timeout: 90000 });
+    async function verifyRollback(reply, target, previous) {
+      assert.equal(reply.status(), 200);
+      const result = await reply.json();
+      assert(result.current_deploy_id && result.current_deploy_id !== previous);
+      assert.notEqual(result.current_deploy_id, target, 'rollback must retain a new audit deployment, not rewrite history');
+      await eventually(async () => assert.equal((await service()).current_deploy_id, result.current_deploy_id));
+      const record = (await deploys()).find(item => item.id === result.current_deploy_id);
+      assert.equal(record.status, 'success'); assert.equal(record.source_path, 'rollback');
+      assert.equal(record.previous_deploy_id, previous);
+      assert.deepEqual(configFor(result.current_deploy_id), configFor(target));
+      await expectData('first\n'); await hidden('modal-service-detail');
+      return { selected_target: target, previous_deploy: previous, resulting_deploy: result.current_deploy_id,
+        selected_configuration_matches: true, journal: 'first newline' };
+    }
     async function inspect() {
       await page.locator('#nav-services').click();
       await page.locator('#input-search-services').fill(fixture.service);
@@ -190,14 +218,55 @@ async function check(name, action) {
       await context.setOffline(false); await connected(); await enabled('btn-create-backup');
       assert.equal(await page.evaluate(() => performance.timeOrigin), origin);
     });
-    await check('Rollback selects the intended release without undoing data', async () => {
+    await check('Safe rollback creates a new audit deployment using the selected release and preserves data', async () => {
       await inspect();
       const target = await page.locator('.btn-rollback').first().getAttribute('data-deploy-id');
-      assert(target); await page.locator(`.btn-rollback[data-deploy-id="${target}"]`).click();
-      await visible('modal-confirm-action'); await page.locator('#chk-confirm-understand').check();
-      await enabled('btn-confirm-proceed'); await page.locator('#btn-confirm-proceed').click();
-      await eventually(async () => assert.equal((await service()).current_deploy_id, target));
-      await expectData('first\n'); await page.locator('#btn-close-service-modal').click();
+      assert(target); const previous = (await service()).current_deploy_id;
+      const [reply] = await Promise.all([rollbackReply(), page.locator(`.btn-rollback[data-deploy-id="${target}"]`).click()]);
+      const evidence = await verifyRollback(reply, target, previous);
+      await hidden('modal-confirm-action');
+      return evidence;
+    });
+    await check('Migration-risk rollback requires acknowledgement and FORCE; cancellation and reconnect preserve safety', async () => {
+      const target = (await service()).current_deploy_id;
+      const cfg = configFor(target);
+      cfg.migration = "printf 'dashboard-migration\\n' > /data/dashboard-migration.txt; sync /data/dashboard-migration.txt /data";
+      await request('POST', '/services', JSON.stringify(cfg));
+      const migrated = (await service()).current_deploy_id;
+      assert.notEqual(migrated, target);
+      assert.equal((await deploys()).find(item => item.id === migrated).state_touched, true);
+      const vol = await request('GET', `/volumes/${fixture.data_volume}`);
+      assert.equal(vol.host_path, path.join(os.homedir(), '.cairn/volumes', fixture.data_volume));
+      const marker = path.join(vol.host_path, 'dashboard-migration.txt');
+      assert.equal(fs.readFileSync(marker, 'utf8'), 'dashboard-migration\n');
+      await expectData('first\n'); await inspect();
+      const openRisk = async () => {
+        const [reply] = await Promise.all([rollbackReply(), page.locator(`.btn-rollback[data-deploy-id="${target}"]`).click()]);
+        assert.equal(reply.status(), 409); await visible('modal-confirm-action');
+        await visible('confirm-force-text-wrapper'); await disabled('btn-confirm-proceed');
+      };
+      await openRisk(); await page.locator('#chk-confirm-understand').check(); await disabled('btn-confirm-proceed');
+      await page.locator('#input-confirm-force').fill('FORCEX'); await disabled('btn-confirm-proceed');
+      await page.locator('#input-confirm-force').fill('FORCE'); await enabled('btn-confirm-proceed');
+      const origin = await page.evaluate(() => performance.timeOrigin);
+      await context.setOffline(true); await visible('global-banner'); await disabled('btn-confirm-proceed');
+      await context.setOffline(false); await connected(); await enabled('btn-confirm-proceed');
+      assert.equal(await page.locator('#input-confirm-force').inputValue(), 'FORCE');
+      assert.equal(await page.locator('#chk-confirm-understand').isChecked(), true);
+      assert.equal(await page.evaluate(() => performance.timeOrigin), origin);
+      await page.locator('#btn-confirm-cancel').click(); await hidden('modal-confirm-action');
+      assert.equal((await service()).current_deploy_id, migrated);
+      await openRisk(); await page.keyboard.press('Escape'); await hidden('modal-confirm-action');
+      assert.equal((await service()).current_deploy_id, migrated);
+      await openRisk(); await page.locator('#chk-confirm-understand').check();
+      await page.locator('#input-confirm-force').fill('FORCE'); await enabled('btn-confirm-proceed');
+      await page.screenshot({ path: path.join(output, 'migration-risk-acknowledged.png') });
+      const [reply] = await Promise.all([rollbackReply(), page.locator('#btn-confirm-proceed').click()]);
+      const evidence = await verifyRollback(reply, target, migrated);
+      assert.equal(fs.readFileSync(marker, 'utf8'), 'dashboard-migration\n', 'forced release rollback must not pretend to undo persistent migration writes');
+      return { ...evidence, migration_deploy: migrated, migration_marker_retained: true,
+        blocked_without_force: true, wrong_confirmation_rejected: true, cancel_and_escape_nonmutating: true,
+        reconnect_preserved_acknowledgement_and_force: true };
     });
     await check('Events filter, Refresh and auto-scroll controls', async () => {
       await page.locator('#nav-events').click(); await visible('timeline-events-body');

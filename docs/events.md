@@ -29,12 +29,20 @@ Audit events are stored in SQLite and listed via `cairn events` / `cairn events 
 
 ## Rollback safety policy
 
-Unsafe = intervening **successful** deploys with `state_touched=true` (set after a successful **migration** step), not arbitrary volume writes.
+Unsafe = intervening deploys with `state_touched=true`, including failed or
+interrupted deployments. This durable marker is saved **before** migration
+execution because an unsuccessful migration may already have changed data.
+It is a conservative migration-risk signal, not tracking of arbitrary volume writes.
 
 - Without `--force`: HTTP 409 + CLI warning + `RollbackBlocked` event; `current_deploy_id` unchanged.
 - With `--force`: `RollbackForced` then normal rollback deploy workflow.
 
 Scripted proof: `./scripts/rollback_safety_demo.sh` (optional `FORCE=1`).
+
+For cron services, Start/Restart reactivate an existing valid schedule as
+`active`; Stop records `stopped` and prevents future task admission. Jobs already
+started continue. These actions emit the same service lifecycle event types and
+do not create a long-running service container or reconstruct a deleted schedule.
 
 ## Deferred / not emitted as separate types yet
 

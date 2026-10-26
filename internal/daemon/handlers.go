@@ -1025,6 +1025,32 @@ func (s *Server) failDeploy(deploy *api.Deploy, svc *api.Service, reason string)
 	})
 }
 
+// Cron lifecycle actions resume the existing registered schedule, never invent
+// one from a stale deploy config or create a long-running service container.
+func (s *Server) validateCronScheduleForLifecycle(svc *api.Service) error {
+	job, err := s.store.GetCronJobByName(svc.Name)
+	if err != nil {
+		return fmt.Errorf("failed to load registered schedule: %w", err)
+	}
+	if job == nil || job.ServiceID != svc.ID {
+		return fmt.Errorf("no registered schedule for service %s", svc.Name)
+	}
+	if _, err := ParseCron(job.Schedule); err != nil {
+		return fmt.Errorf("invalid registered schedule: %w", err)
+	}
+	if strings.TrimSpace(job.Command) == "" {
+		return fmt.Errorf("registered schedule has no command")
+	}
+	cfg, err := s.loadCurrentServiceConfig(svc)
+	if err != nil {
+		return fmt.Errorf("failed to load cron deploy config: %w", err)
+	}
+	if cfg.Kind != "cron" {
+		return fmt.Errorf("current deploy config is not kind cron")
+	}
+	return nil
+}
+
 func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
@@ -1039,7 +1065,14 @@ func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if svc.RuntimeID != "" {
+	if svc.Kind == "cron" {
+		cronTaskAdmissionMu.Lock()
+		defer cronTaskAdmissionMu.Unlock()
+		if err := s.validateCronScheduleForLifecycle(svc); err != nil {
+			s.error(w, http.StatusBadRequest, "cannot start cron schedule: "+err.Error())
+			return
+		}
+	} else if svc.RuntimeID != "" {
 		info, inspectErr := s.runtime.InspectContainer(r.Context(), svc.RuntimeID)
 		if inspectErr != nil || info == nil || info.State != runtime.StateRunning {
 			if err := s.runtime.StartContainer(r.Context(), svc.RuntimeID); err != nil {
@@ -1060,6 +1093,9 @@ func (s *Server) handleStartService(w http.ResponseWriter, r *http.Request) {
 
 	svc.DesiredState = "running"
 	svc.ActualState = "running"
+	if svc.Kind == "cron" {
+		svc.DesiredState, svc.ActualState = "active", "active"
+	}
 	if err := s.store.UpsertService(svc); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1090,7 +1126,10 @@ func (s *Server) handleStopService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if svc.RuntimeID != "" {
+	if svc.Kind == "cron" {
+		cronTaskAdmissionMu.Lock()
+		defer cronTaskAdmissionMu.Unlock()
+	} else if svc.RuntimeID != "" {
 		if err := s.runtime.StopContainer(r.Context(), svc.RuntimeID); err != nil {
 			s.error(w, http.StatusInternalServerError, "failed to stop container: "+err.Error())
 			return
@@ -1128,8 +1167,17 @@ func (s *Server) handleRestartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	restarted := false
-	if svc.RuntimeID != "" {
+	if svc.Kind == "cron" {
+		cronTaskAdmissionMu.Lock()
+		defer cronTaskAdmissionMu.Unlock()
+		if err := s.validateCronScheduleForLifecycle(svc); err != nil {
+			s.error(w, http.StatusBadRequest, "cannot restart cron schedule: "+err.Error())
+			return
+		}
+	}
+
+	restarted := svc.Kind == "cron"
+	if svc.Kind != "cron" && svc.RuntimeID != "" {
 		if err := s.runtime.RestartContainer(r.Context(), svc.RuntimeID); err == nil {
 			restarted = true
 		} else {
@@ -1170,6 +1218,9 @@ func (s *Server) handleRestartService(w http.ResponseWriter, r *http.Request) {
 
 	svc.DesiredState = "running"
 	svc.ActualState = "running"
+	if svc.Kind == "cron" {
+		svc.DesiredState, svc.ActualState = "active", "active"
+	}
 	if err := s.store.UpsertService(svc); err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
 		return

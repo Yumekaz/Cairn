@@ -269,6 +269,7 @@ func (s *Server) execDeployRunMigration(ctx *duraflow.StepContext) error {
 			Name:        cfg.Name,
 			Kind:        cfg.Kind,
 			Image:       cfg.Image,
+			User:        cfg.User,
 			Command:     []string{"/bin/sh", "-c", cfg.Migration},
 			Environment: s.resolveEnvPlaceholders(ctx.Context, s.mergeDatabaseEnvs(svc.ID, cfg.Environment)),
 			Volumes:     cfg.Volumes,

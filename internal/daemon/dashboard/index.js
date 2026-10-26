@@ -683,7 +683,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (activeServiceName === s.name) loadConsoleLogs(s.name, { force: false });
       }, LOGS_POLL_MS);
 
-      setupServiceActions(s.name, s.actual_state);
+      setupServiceActions(s.name, s.actual_state, s.kind);
     } catch (err) {
       console.error('Failed to inspect service:', err);
       showToast(`Failed to load service: ${err.message}`, 'error');
@@ -691,7 +691,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function setupServiceActions(serviceName, actualState) {
+  function setupServiceActions(serviceName, actualState, kind) {
     const btnStart = document.getElementById('btn-action-start');
     const btnStop = document.getElementById('btn-action-stop');
     const btnRestart = document.getElementById('btn-action-restart');
@@ -726,19 +726,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // State-aware enablement when online
     const state = (actualState || '').toLowerCase();
+    const isCron = kind === 'cron';
+    const active = state === 'running' || state === 'starting' || (isCron && state === 'active');
     const online = isOnline;
     [newStart, newStop, newRestart, newRefresh].forEach((button) => { button.dataset.busy = '0'; });
-    newStart.dataset.stateDisabled = state === 'running' || state === 'starting' ? '1' : '0';
+    newStart.dataset.stateDisabled = active ? '1' : '0';
     newStop.dataset.stateDisabled = state === 'stopped' || state === 'failed' ? '1' : '0';
     newRestart.dataset.stateDisabled = '0';
     newRefresh.dataset.stateDisabled = '0';
-    newStart.disabled = !online || state === 'running' || state === 'starting';
+    newStart.disabled = !online || active;
     newStop.disabled = !online || state === 'stopped' || state === 'failed';
     newRestart.disabled = !online;
     newRefresh.disabled = !online;
 
     if (!online) {
       hint.textContent = 'Daemon offline — lifecycle actions disabled.';
+    } else if (isCron && active) {
+      hint.textContent = 'Schedule is active. Stop pauses future runs; running jobs continue.';
+    } else if (isCron && state === 'stopped') {
+      hint.textContent = 'Schedule is stopped. Start or restart to resume future runs; running jobs continue.';
     } else if (state === 'running') {
       hint.textContent = 'Service is running. Stop or restart as needed.';
     } else if (state === 'stopped') {

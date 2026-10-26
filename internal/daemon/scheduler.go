@@ -8,9 +8,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -170,6 +171,11 @@ type Scheduler struct {
 	dataDir string
 }
 
+// Serialize cron-service Stop with task admission through Start acknowledgement,
+// not with the job's lifetime. Server lifecycle handlers take lifecycleMu first;
+// the scheduler never takes lifecycleMu. Non-cron service jobs are unaffected.
+var cronTaskAdmissionMu sync.Mutex
+
 // NewScheduler creates a new scheduler instance.
 func NewScheduler(store *store.Store, r runtime.RuntimeBackend, dataDir string) *Scheduler {
 	return &Scheduler{
@@ -239,6 +245,31 @@ func (s *Scheduler) ExecuteCronJob(ctx context.Context, cj *api.CronJob) error {
 		return fmt.Errorf("service not found for job: %s", cj.ServiceID)
 	}
 
+	releaseAdmission := func() {}
+	if svc.Kind == "cron" {
+		cronTaskAdmissionMu.Lock()
+		locked := true
+		releaseAdmission = func() {
+			if locked {
+				locked = false
+				cronTaskAdmissionMu.Unlock()
+			}
+		}
+		defer releaseAdmission()
+		// A tick may have queued this execution before Stop completed. Read
+		// intent again under the admission lock before recording any new run.
+		svc, err = s.store.GetService(cj.ServiceID)
+		if err != nil {
+			return fmt.Errorf("failed to get service %s: %w", cj.ServiceID, err)
+		}
+		if svc == nil {
+			return fmt.Errorf("service not found for job: %s", cj.ServiceID)
+		}
+		if svc.DesiredState == "stopped" {
+			return nil
+		}
+	}
+
 	if svc.CurrentDeployID == "" {
 		return fmt.Errorf("service %s has no current deployment config to run from", svc.Name)
 	}
@@ -280,6 +311,7 @@ func (s *Scheduler) ExecuteCronJob(ctx context.Context, cj *api.CronJob) error {
 		Name:        cfg.Name,
 		Kind:        cfg.Kind,
 		Image:       cfg.Image,
+		User:        cfg.User,
 		Command:     []string{"/bin/sh", "-c", cj.Command},
 		Environment: s.resolveEnvPlaceholders(ctx, cfg.Environment),
 		Volumes:     cfg.Volumes,
@@ -301,6 +333,7 @@ func (s *Scheduler) ExecuteCronJob(ctx context.Context, cj *api.CronJob) error {
 		s.failJobRun(jr, "Failed to start task container: "+err.Error())
 		return err
 	}
+	releaseAdmission()
 
 	// Wait for execution to finish
 	var exitCode int

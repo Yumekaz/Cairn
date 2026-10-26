@@ -90,6 +90,15 @@ restart; deliberately stop applications through Cairn before decommissioning
 the runtime. This is not proof against hostile container escapes or a
 replacement for an independent isolation audit.
 
+Security changes to workload mount namespaces require an explicit workload
+restart; restarting the two daemons alone intentionally preserves running
+containers. The runtime now requires read-only procfs and private inert masks
+for sensitive proc interfaces. Exec refuses a legacy unprotected namespace,
+but that refusal does not secure or stop an already-running old workload.
+Plan a controlled service restart after installing this runtime update. Procfs
+tuning writes (including per-process proc-file writes) are unsupported; readable
+process/status information and private writable shared memory remain available.
+
 Inspect failures with `journalctl -u cairn -u cairn-runtime`; never publish
 unredacted application secrets. Installation does not reboot the host. A
 disposable VM must separately demonstrate guest boot/reboot/crash recovery.

@@ -23,7 +23,7 @@ The supported deployment scope is **one Linux host with controlled workloads**. 
 
 ## Quick start
 
-Requirements: Linux, Go **1.26.4 or a compatible newer toolchain**, Python **3.10+**, and sudo/root for full Mini-Docker networking and namespace operations. The bootstrap prepares the sibling repositories and runtime prerequisites.
+Requirements: Linux **x86_64, kernel 5.12+** with usable namespaces, cgroups v2, pidfds and `mount_setattr`; Go **1.26.4 or a compatible newer toolchain**; Python **3.11+**; and sudo/root for full Mini-Docker networking and namespace operations. Missing isolation enforcement fails closed. The bootstrap prepares the sibling repositories and runtime prerequisites.
 
 ```bash
 git clone https://github.com/Yumekaz/Cairn.git
@@ -34,7 +34,7 @@ cairn doctor
 ./scripts/clean_demo.sh
 ```
 
-The dashboard is available at **http://127.0.0.1:2476/dashboard/**. Keep it local: Host/origin protections are not authentication or TLS.
+The dashboard is available at **http://127.0.0.1:2476/dashboard/**. Keep the compatibility bootstrap local: Host/origin protections are not a substitute for authentication or TLS. The [boot-enabled installer](docs/ADMINISTRATION.md#boot-enabled-linux-installation) enables private admin credentials; non-loopback administration requires both native authentication and TLS.
 
 Build-only setup is available without privilege:
 

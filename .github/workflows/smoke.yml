@@ -195,8 +195,8 @@ jobs:
           for s in scripts/*.sh scripts/vm/*.sh; do bash -n "$s"; done
       - name: Verification runner regressions
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
-      - name: Dashboard focus regressions
-        run: node --test scripts/dashboard_focus.test.cjs
+      - name: Dashboard focus and cron lifecycle regressions
+        run: node --test scripts/dashboard_focus.test.cjs scripts/dashboard_events_harness.test.cjs internal/daemon/dashboard/cron_lifecycle_test.cjs
 
       - name: Note on full reliability gate
         run: |
