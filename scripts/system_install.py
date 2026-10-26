@@ -88,6 +88,17 @@ def check_path(path):
     return path
 
 
+def check_install_prefix(path):
+    path = Path(path)
+    if path == PREFIX:
+        # The explicit application prefix is shorter than ordinary state paths.
+        # Validate through its release child without exempting any ancestor
+        # from symlink or root-ownership/permission checks at installation.
+        check_path(path / 'releases')
+        return path
+    return check_path(path)
+
+
 def validate_config(cfg, account):
     base = check_path(Path(account.pw_dir) / '.cairn')
     if cfg.get('data_dir') != str(base):
@@ -361,7 +372,7 @@ def apply_private(args):
             pass
         else:
             raise ValueError('another runtime answers at the old configured socket; no duplicate will be started')
-    prefix = check_path(args.prefix)
+    prefix = check_install_prefix(args.prefix)
     secure_root_directory(prefix)
     secure_root_directory(prefix / 'releases')
     release = prefix / 'releases' / digest[:20]

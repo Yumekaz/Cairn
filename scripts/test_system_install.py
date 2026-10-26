@@ -13,6 +13,24 @@ spec.loader.exec_module(installer)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_documented_prefix_is_accepted_without_allowing_broad_paths(self):
+        self.assertEqual(installer.check_install_prefix('/opt/cairn'), installer.PREFIX)
+        self.assertEqual(installer.check_install_prefix('/usr/local/lib/cairn'), Path('/usr/local/lib/cairn'))
+        for value in ('/', '/opt', '/usr', '/opt/other', '/opt/cairn/../other', '/opt/cairn/%h'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                installer.check_install_prefix(value)
+
+    def test_documented_prefix_still_checks_symlinks_and_unsafe_ancestors(self):
+        with patch.object(Path, 'is_symlink', autospec=True, side_effect=lambda path: path == Path('/opt')):
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                installer.check_install_prefix('/opt/cairn')
+        def metadata(path):
+            return types.SimpleNamespace(st_uid=0, st_mode=0o40775 if path == Path('/opt') else 0o40755)
+        with patch.object(Path, 'lstat', autospec=True, side_effect=metadata), patch.object(Path, 'mkdir') as create:
+            with self.assertRaisesRegex(ValueError, 'not root-controlled: /opt'):
+                installer.secure_root_directory(installer.check_install_prefix('/opt/cairn'))
+            create.assert_not_called()
+
     def test_verified_outputs_are_private_at_creation_even_under_umask_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

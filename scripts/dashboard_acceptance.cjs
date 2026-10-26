@@ -101,7 +101,7 @@ async function check(name, action) {
     await check('Service search, empty result and inspection', async () => {
       await page.locator('#nav-services').click();
       await page.locator('#input-search-services').fill('no-such-' + fixture.service);
-      await eventually(async () => assert.match(await page.locator('#services-container').innerText(), /No matching services/i));
+      await eventually(async () => assert.equal((await page.locator('#services-container .empty-title').innerText()).trim(), 'No matches'));
       await inspect();
     });
     await check('Start and Start-disabled state match actual serving/data', async () => {
