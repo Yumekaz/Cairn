@@ -1,7 +1,9 @@
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
+import signal
 import sys
 import subprocess
 import tempfile
@@ -207,7 +209,7 @@ class NetworkSeedTests(unittest.TestCase):
             with self.assertRaises(CaptureStopped):
                 vm.main()
         status = json.loads((out / 'status.json').read_text())
-        self.assertEqual(status['state'], 'preparing')
+        self.assertEqual(status['state'], 'failed')
         self.assertEqual(status['checks'], {})
         self.assertEqual(status['network_profile']['id'], 'private-static-v1')
         self.assertEqual(status['ssh_forward'], {'host': '127.0.0.1', 'port': 23222, 'guest_port': 22})
@@ -237,7 +239,7 @@ class NetworkSeedTests(unittest.TestCase):
         start = next(node for node in ast.walk(main) if isinstance(node, ast.FunctionDef) and node.name == 'start_vm')
         calls = list(node for node in ast.walk(start) if isinstance(node, ast.Call))
         inventory = next(node for node in calls if isinstance(node.func, ast.Name) and node.func.id == 'prelaunch_inventory')
-        launch = next(node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen')
+        launch = next(node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == 'start_process')
         self.assertLess(inventory.lineno, launch.lineno)
         self.assertTrue(any(isinstance(node.func, ast.Name) and node.func.id == 'network_arguments' for node in calls))
         text = ast.get_source_segment(Path(vm.__file__).read_text(), main)
@@ -250,6 +252,324 @@ class NetworkSeedTests(unittest.TestCase):
                          'source_inputs = capture_source_inputs(args.allow_dirty)',
                          'verify_source_inputs(source_inputs)'):
             self.assertIn(retained, text)
+
+
+class VMInterruptionTests(unittest.TestCase):
+    def lifecycle(self, process=None, save=None):
+        status = {'state': 'guest-graceful-reboot', 'checks': {'fresh_install': 'passed'},
+                  'source_inputs': {'SERVER': {'commit': 'frozen'}}, 'fixture': {'service': 'owned'}}
+        saved = []
+        def persist(phase):
+            status['state'] = phase
+            saved.append(json.loads(json.dumps(status)))
+        serial = unittest.mock.Mock()
+        return vm.VMRunLifecycle(status, save or persist, lambda: process, lambda: serial), status, saved, serial
+
+    def previous_handlers(self):
+        return {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+
+    def assert_handlers(self, previous):
+        self.assertEqual(self.previous_handlers(), previous)
+
+    def test_stop_signals_preserve_partial_gates_sources_and_owned_cleanup(self):
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signum=signum):
+                process = unittest.mock.Mock()
+                process.poll.return_value = None
+                lifecycle, status, saved, serial = self.lifecycle(process)
+                previous = self.previous_handlers()
+                with self.assertRaises(vm.VMInterrupted) as caught:
+                    with lifecycle:
+                        signal.getsignal(signum)(signum, None)
+                self.assertEqual(caught.exception.signum, signum)
+                self.assertEqual(status['state'], 'interrupted')
+                self.assertEqual(status['checks'], {'fresh_install': 'passed'})
+                self.assertEqual(status['source_inputs'], {'SERVER': {'commit': 'frozen'}})
+                self.assertEqual(status['interruption']['phase'], 'guest-graceful-reboot')
+                self.assertTrue(all(item['state'] != 'passed' for item in saved))
+                process.terminate.assert_called_once_with()
+                process.wait.assert_called_once_with(timeout=10)
+                process.kill.assert_not_called()
+                serial.close.assert_called_once_with()
+                self.assert_handlers(previous)
+
+    def test_no_owned_process_does_not_signal_a_stale_recorded_pid(self):
+        lifecycle, status, _, serial = self.lifecycle()
+        status['qemu_pid'] = 123456  # Historical evidence is never signal authority.
+        with patch.object(vm.os, 'kill', side_effect=AssertionError('numeric signal forbidden')):
+            with self.assertRaises(vm.VMInterrupted):
+                with lifecycle:
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        self.assertEqual(status['state'], 'interrupted')
+        serial.close.assert_called_once_with()
+
+    def test_evidence_write_failure_cannot_skip_cleanup_or_mask_interruption(self):
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signum=signum):
+                process = unittest.mock.Mock()
+                process.poll.return_value = None
+                save = unittest.mock.Mock(side_effect=OSError('fixture disk full/fsync failure'))
+                lifecycle, status, _, serial = self.lifecycle(process, save=save)
+                previous = self.previous_handlers()
+                with self.assertRaises(vm.VMInterrupted):
+                    with lifecycle:
+                        signal.getsignal(signum)(signum, None)
+                self.assertEqual(save.call_args_list, [unittest.mock.call('interrupted')] * 2)
+                process.terminate.assert_called_once_with()
+                process.wait.assert_called_once_with(timeout=10)
+                serial.close.assert_called_once_with()
+                self.assertIn('disk full', status['evidence_error'])
+                self.assert_handlers(previous)
+
+    def test_failed_state_write_failure_still_cleans_up_and_preserves_primary_error(self):
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        lifecycle, status, _, serial = self.lifecycle(process, save=unittest.mock.Mock(side_effect=PermissionError('fixture denied')))
+        previous = self.previous_handlers()
+        original = RuntimeError('primary installation failure')
+        with self.assertRaises(RuntimeError) as caught:
+            with lifecycle:
+                raise original
+        self.assertIs(caught.exception, original)
+        process.terminate.assert_called_once_with()
+        serial.close.assert_called_once_with()
+        self.assert_handlers(previous)
+
+    def test_terminate_timeout_uses_only_owned_popen_and_original_cleanup_budgets(self):
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired('owned-qemu', 10), 0]
+        lifecycle, status, _, serial = self.lifecycle(process)
+        previous = self.previous_handlers()
+        with self.assertRaises(vm.VMInterrupted):
+            with lifecycle:
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_args_list, [unittest.mock.call(timeout=10)] * 2)
+        serial.close.assert_called_once_with()
+        self.assert_handlers(previous)
+
+    def test_partial_handler_registration_restores_original_handlers(self):
+        lifecycle, _, _, _ = self.lifecycle()
+        previous = self.previous_handlers()
+        install = signal.signal
+        def fail_second(signum, handler):
+            if signum == signal.SIGINT and handler == lifecycle.handle_signal:
+                raise RuntimeError('fixture registration failure')
+            return install(signum, handler)
+        with patch.object(vm.signal, 'signal', side_effect=fail_second):
+            with self.assertRaisesRegex(RuntimeError, 'registration failure'):
+                with lifecycle:
+                    self.fail('body must not run')
+        self.assert_handlers(previous)
+
+    def test_failed_terminal_pass_write_is_corrected_to_failed_and_still_raised(self):
+        process = unittest.mock.Mock()
+        process.poll.return_value = 0
+        lifecycle, status, saved, serial = self.lifecycle(process)
+        original_save = lifecycle.save
+        first_error = OSError('fixture terminal fsync failed after publishing')
+        calls = []
+        def save(phase):
+            calls.append(phase)
+            original_save(phase)
+            if phase == 'passed':
+                raise first_error
+        lifecycle.save = save
+        previous = self.previous_handlers()
+        with self.assertRaises(OSError) as caught:
+            with lifecycle:
+                pass
+        self.assertIs(caught.exception, first_error)
+        self.assertEqual(calls, ['passed', 'failed'])
+        self.assertEqual(status['state'], 'failed')
+        self.assertEqual(saved[-1]['state'], 'failed')
+        self.assertIn('terminal fsync', status['evidence_error'])
+        self.assertIn('terminal evidence write failed', status['failure'])
+        serial.close.assert_called_once_with()
+        self.assert_handlers(previous)
+
+    def test_signal_during_popen_records_ownership_before_exception(self):
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        lifecycle, status, _, serial = self.lifecycle()
+        def launch(*args, **kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return process
+        with patch.object(vm.subprocess, 'Popen', side_effect=launch):
+            with self.assertRaises(vm.VMInterrupted):
+                with lifecycle:
+                    lifecycle.start_process(['fake-owned-qemu'])
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=10)
+        serial.close.assert_called_once_with()
+        self.assertEqual(status['state'], 'interrupted')
+
+    def test_signal_during_cleanup_cannot_leave_a_passed_result(self):
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        lifecycle, status, _, _ = self.lifecycle(process)
+        process.terminate.side_effect = lambda: signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+        with self.assertRaises(vm.VMInterrupted):
+            with lifecycle:
+                status['checks']['guest_reboot'] = 'passed'
+        self.assertEqual(status['state'], 'interrupted')
+        self.assertEqual(status['checks']['guest_reboot'], 'passed')
+
+    def test_normal_failure_cleanup_and_success_restore_handlers(self):
+        for success in (False, True):
+            with self.subTest(success=success):
+                process = unittest.mock.Mock()
+                process.poll.return_value = 0
+                lifecycle, status, _, serial = self.lifecycle(process)
+                previous = self.previous_handlers()
+                if success:
+                    with lifecycle:
+                        pass
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'original'):
+                        with lifecycle:
+                            raise RuntimeError('original')
+                self.assertEqual(status['state'], 'passed' if success else 'failed')
+                process.terminate.assert_not_called()
+                serial.close.assert_called_once_with()
+                self.assert_handlers(previous)
+
+    def test_real_signal_delivery_is_confined_to_a_separate_test_child(self):
+        script = r'''
+import json, signal, sys
+from unittest.mock import Mock
+sys.path.insert(0, sys.argv[1])
+from vm_acceptance import VMRunLifecycle, VMInterrupted
+status = {'state': 'guest-abrupt-shutdown', 'checks': {'fresh_install': 'passed'}}
+prior = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+process = Mock(); process.poll.return_value = None
+serial = Mock()
+def save(phase): status['state'] = phase
+try:
+    with VMRunLifecycle(status, save, lambda: process, lambda: serial):
+        signal.raise_signal(int(sys.argv[2]))
+except VMInterrupted as error:
+    assert error.signum == int(sys.argv[2])
+else:
+    raise AssertionError('signal did not interrupt')
+assert status['state'] == 'interrupted' and status['checks'] == {'fresh_install': 'passed'}
+assert all(signal.getsignal(s) == handler for s, handler in prior.items())
+process.terminate.assert_called_once_with()
+process.wait.assert_called_once_with(timeout=10)
+serial.close.assert_called_once_with()
+print(json.dumps(status))
+'''
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signum=signum):
+                result = subprocess.run([sys.executable, '-B', '-c', script,
+                                         str(Path(vm.__file__).parent), str(signum)],
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)['state'], 'interrupted')
+
+    def test_main_real_stop_signal_keeps_partial_proof_and_cleans_owned_fake_qemu(self):
+        # Actual signal delivery is confined to this fresh Python test child.
+        # Every build/SSH/QEMU operation is replaced; no guest is launched.
+        script = r'''
+import hashlib, json, os, signal, subprocess, sys, types
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import vm_acceptance as vm
+baseline = os.environ.get('VM_SIGNAL_TEST_BASELINE_REF')
+if baseline:
+    source = subprocess.check_output(['git', 'show', baseline + ':scripts/vm_acceptance.py'],
+                                    cwd=Path(sys.argv[1]).parent, text=True)
+    module = types.ModuleType('vm_acceptance_before')
+    module.__file__ = vm.__file__
+    exec(compile(source, vm.__file__, 'exec'), module.__dict__)
+    vm = module
+base = Path(sys.argv[2]); signum = int(sys.argv[3])
+root = base / 'SERVER'; (root / 'bin').mkdir(parents=True)
+for binary in ('cairn', 'cairnd'):
+    (root / 'bin' / binary).write_bytes(b'fake build artifact, not executable')
+busybox = base / 'Mini-Docker/rootfs/bin/busybox'
+busybox.parent.mkdir(parents=True); busybox.write_bytes(b'fake busybox, never executed')
+out = base / 'evidence'; out.mkdir()
+image = base / 'image.qcow2'; image.write_bytes(b'fake image, never booted')
+digest = hashlib.sha256(image.read_bytes()).hexdigest()
+(base / 'SHA256SUMS').write_text(digest + ' *image.qcow2\n')
+source_inputs = {name: {'commit': 'frozen-source', 'working_tree': '', 'diff_sha256': 'frozen'}
+                 for name in ('SERVER', 'DURAFLOW', 'Mini-Docker')}
+previous = {'state': 'failed', 'checks': {}, 'image_sha256': digest,
+            'fixture': {'service': 'notes-proof-01234567'},
+            'installed_units': ['cairn.service', 'cairn-runtime.service']}
+(out / 'status.json').write_text(json.dumps(previous))
+(out / 'seed.img').write_bytes(b'fake original seed')
+(out / 'source-proof.txt').write_text('preserve this existing proof')
+prior = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+data = 'first\n'
+class Archive:
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
+    def add(self, *args, **kwargs): pass
+class FakeQemu:
+    pid = 424242
+    exited = False
+    def poll(self): return 0 if self.exited else None
+    def terminate(self):
+        self.exited = True
+        (out / 'owned-cleanup.txt').write_text('terminated only actual owned Popen')
+    def wait(self, timeout):
+        assert timeout == 10
+        return 0
+    def kill(self): raise AssertionError('unexpected QEMU kill')
+process = FakeQemu()
+def fake_run(argv, **kwargs):
+    global data
+    output = ''
+    if '--outdir' in argv:
+        wheels = Path(argv[argv.index('--outdir') + 1]); wheels.mkdir()
+        (wheels / 'fixture.whl').write_bytes(b'fake wheel, never installed')
+    elif argv[0] == 'ssh':
+        command = argv[-1]
+        if command == 'cat /proc/sys/kernel/random/boot_id': output = 'fake-boot\n'
+        elif 'http://localhost/services/' in command: output = '{"desired_state":"running"}'
+        elif command.startswith('systemctl is-active '): output = 'active\nactive\n' + data
+        elif "--data 'before-reboot'" in command: data = 'first\nbefore-reboot\n'
+        elif command == 'sudo reboot': signal.raise_signal(signum)
+    return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
+argv = ['vm_acceptance', '--image', str(image), '--output', str(out),
+        '--resume', '--resume-installed', '--install-mode', 'verified-binaries']
+with patch.object(vm, 'ROOT', root), patch.object(sys, 'argv', argv), \
+     patch.object(vm, 'capture_source_inputs', return_value=source_inputs), \
+     patch.object(vm, 'verify_source_inputs'), patch.object(vm.socket, 'socket'), \
+     patch.object(vm.tarfile, 'open', return_value=Archive()), \
+     patch.object(vm.subprocess, 'check_output', return_value=b''), \
+     patch.object(vm.subprocess, 'run', side_effect=fake_run), \
+     patch.object(vm.subprocess, 'Popen', return_value=process), \
+     patch.object(vm, 'prelaunch_inventory', return_value={'active_qemu': []}):
+    try:
+        vm.main()
+    except BaseException:
+        pass
+    else:
+        raise AssertionError('interrupted main returned normally')
+assert all(signal.getsignal(s) == handler for s, handler in prior.items())
+'''
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signum=signum), tempfile.TemporaryDirectory(prefix='vm-signal-main-') as directory:
+                result = subprocess.run([sys.executable, '-B', '-c', script,
+                                         str(Path(vm.__file__).parent), directory, str(signum)],
+                                        text=True, capture_output=True, timeout=10)
+                evidence = Path(directory) / 'evidence'
+                status = json.loads((evidence / 'status.json').read_text())
+                self.assertEqual(status['state'], 'interrupted', result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(status['checks'], {'fresh_install': 'passed'})
+                self.assertEqual(status['source_inputs']['SERVER']['commit'], 'frozen-source')
+                self.assertEqual(status['interruption']['phase'], 'guest-graceful-reboot')
+                self.assertEqual((evidence / 'source-proof.txt').read_text(), 'preserve this existing proof')
+                self.assertEqual(len(list(evidence.glob('previous-status-*.json'))), 1)
+                self.assertTrue((evidence / 'source-revisions.json').exists())
+                self.assertTrue((evidence / 'owned-cleanup.txt').exists())
 
 
 if __name__ == '__main__':

@@ -2,6 +2,11 @@
 
 This record describes demonstrated behavior, not a zero-bug or production-ready guarantee.
 
+This is the **historical October 8–14 milestone**, with the revisions and
+limits recorded below. It does not close the later hardening gates or prove
+newer runtime revisions. See [the October hardening follow-up](HARDENING_2026-10.md)
+for current results and unfinished work.
+
 ## Release closeout
 
 The agreed, bounded acceptance gates below are closed. Historical failed, interrupted, skipped and blocked attempts remain retained; they are not relabelled as passes. The final pushed-head GitHub report is generated after the documentation commit, so this document does not try to embed its own future commit ID. Retained report location: `validation-runs/github-release-final-20261014/report.{md,json}`. The preceding code-head snapshot is `validation-runs/github-pre-closeout-final-oct14/`.
