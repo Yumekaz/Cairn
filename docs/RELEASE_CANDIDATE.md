@@ -78,6 +78,13 @@ the baseline nor a process-local lock establishes globally atomic storage.
 
 ### Final-evidence protocol
 
+The VM runner defaults to software TCG for compatibility. Where `/dev/kvm` is
+already accessible, select `--acceleration kvm` explicitly for hardware-backed
+proof. The verifier checks the kernel API and records the selected mode; it
+does not grant permissions, switch modes on failure, extend the 15-minute
+integration watchdog, reduce the test list or change application deadlines.
+Keep a failed TCG timing attempt separate from a later KVM result.
+
 1. Finish the safety implementation and review its failure paths. Retain
    failing-before/passing-after StopACK, idempotent Stop, cleanup-retention,
    physical-restore replay, desired-stopped, deletion/job-admission,

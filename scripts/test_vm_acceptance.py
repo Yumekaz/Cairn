@@ -4,12 +4,67 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import sys
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import vm_acceptance as vm
+
+
+class AccelerationTests(unittest.TestCase):
+    def test_tcg_default_is_unchanged_and_does_not_probe_devices(self):
+        self.assertEqual(vm.acceleration_arguments('tcg'), ['-accel', 'tcg,thread=multi'])
+        with patch.object(vm.os, 'open', side_effect=AssertionError('unexpected device access')):
+            self.assertEqual(vm.verify_acceleration('tcg'), {'mode': 'tcg', 'fallback': False})
+
+    def test_kvm_only_uses_existing_device_and_records_kernel_api(self):
+        with patch.object(vm.os, 'open', return_value=71) as opened, \
+             patch.object(vm.os, 'fstat', return_value=SimpleNamespace(st_mode=stat.S_IFCHR)), \
+             patch('fcntl.ioctl', return_value=12) as ioctl, patch.object(vm.os, 'close') as closed:
+            self.assertEqual(vm.verify_acceleration('kvm'), {'mode':'kvm','api_version':12,'fallback':False})
+            opened.assert_called_once_with('/dev/kvm', vm.os.O_RDWR|vm.os.O_CLOEXEC|vm.os.O_NOFOLLOW)
+            ioctl.assert_called_once_with(71,0xAE00)
+            closed.assert_called_once_with(71)
+        self.assertEqual(vm.acceleration_arguments('kvm'), ['-accel','kvm'])
+
+    def test_missing_device_or_denial_never_silently_falls_back(self):
+        for error in (PermissionError(), FileNotFoundError()):
+            with self.subTest(error=error), patch.object(vm.os,'open',side_effect=error):
+                with self.assertRaisesRegex(RuntimeError,'existing /dev/kvm access'):
+                    vm.verify_acceleration('kvm')
+
+    def test_wrong_device_or_api_refuses_and_closes_descriptor(self):
+        for mode,version in ((stat.S_IFREG,12),(stat.S_IFCHR,11)):
+            with self.subTest(mode=mode,version=version), \
+                 patch.object(vm.os,'open',return_value=71), \
+                 patch.object(vm.os,'fstat',return_value=SimpleNamespace(st_mode=mode)), \
+                 patch('fcntl.ioctl',return_value=version), patch.object(vm.os,'close') as closed:
+                with self.assertRaises(RuntimeError): vm.verify_acceleration('kvm')
+                closed.assert_called_once_with(71)
+
+    def test_unknown_backend_cannot_inject_options(self):
+        for mode in ('auto','kvm:tcg','kvm,thread=single',True,None):
+            with self.subTest(mode=mode), self.assertRaises(ValueError): vm.acceleration_arguments(mode)
+
+    def test_kernel_query_error_still_closes_device_without_fallback(self):
+        with patch.object(vm.os,'open',return_value=71), \
+             patch.object(vm.os,'fstat',return_value=SimpleNamespace(st_mode=stat.S_IFCHR)), \
+             patch('fcntl.ioctl',side_effect=OSError('kernel query refused')), \
+             patch.object(vm.os,'close') as closed:
+            with self.assertRaises(OSError): vm.verify_acceleration('kvm')
+            closed.assert_called_once_with(71)
+
+    def test_hardware_option_does_not_change_resource_or_assertion_budgets(self):
+        source=(vm.ROOT/'scripts/vm_acceptance.py').read_text()
+        guest=(vm.ROOT/'scripts/vm/install_and_prove.sh').read_text()
+        self.assertIn('"-cpu", "max", "-smp", "2", "-m", "2048"',source)
+        self.assertIn('def ssh(command, timeout=60',source)
+        self.assertIn('bin/cairn-integration-tests -test.v -test.timeout 15m',guest)
+        self.assertIn('verify_integration_log.py',guest)
+        self.assertNotIn('-icount',source)
 
 
 class SourceFreezeTests(unittest.TestCase):

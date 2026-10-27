@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fresh Linux installation, guest reboot and abrupt guest shutdown proof.
-Uses a verified official image, dedicated 8GiB overlay, TCG, and localhost SSH.
+Uses a verified image, dedicated 8GiB overlay, explicit TCG/KVM, and local SSH.
 Never reboots the host and never passes host account credentials to the guest.
 """
 import argparse
@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import stat
 import subprocess
 import tarfile
 import time
@@ -26,6 +27,36 @@ STATIC_NETWORK = {
 }
 LEGACY_NETWORK = {'id': 'legacy-default-usernet-v0',
                   'addressing': 'original seed and QEMU defaults retained; not a static-network proof'}
+
+
+def acceleration_arguments(mode):
+    if mode == 'tcg':
+        return ['-accel', 'tcg,thread=multi']
+    if mode == 'kvm':
+        return ['-accel', 'kvm']
+    raise ValueError('acceleration must be exactly tcg or kvm')
+
+
+def verify_acceleration(mode):
+    """Explicit KVM fails closed; never chmod devices or silently fall back."""
+    acceleration_arguments(mode)
+    if mode == 'tcg':
+        return {'mode': 'tcg', 'fallback': False}
+    import fcntl
+    try:
+        descriptor = os.open('/dev/kvm', os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise RuntimeError('explicit KVM requires existing /dev/kvm access; no permissions changed') from exc
+    try:
+        if not stat.S_ISCHR(os.fstat(descriptor).st_mode):
+            raise RuntimeError('/dev/kvm is not a character device')
+        # Linux KVM_GET_API_VERSION, confirmed by the installed linux/kvm.h.
+        version = fcntl.ioctl(descriptor, 0xAE00)
+        if version != 12:
+            raise RuntimeError('unsupported KVM API version')
+        return {'mode': 'kvm', 'api_version': version, 'fallback': False}
+    finally:
+        os.close(descriptor)
 
 
 def select_network_profile(previous=None):
@@ -325,11 +356,14 @@ def main():
     parser.add_argument("--reverify-installed", action="store_true", help="explicitly install final code on a previously passed guest and repeat its recovery proof")
     parser.add_argument("--integration-proof", action="store_true", help="run the complete integration suite inside the disposable guest")
     parser.add_argument('--allow-dirty', action='store_true', help='Explicit development snapshot only; never final-revision proof')
+    parser.add_argument('--acceleration', choices=('tcg', 'kvm'), default='tcg',
+                        help='explicit execution backend; KVM requires existing access and never falls back')
     args = parser.parse_args()
     if args.integration_proof and args.install_mode != 'verified-binaries':
         parser.error('--integration-proof requires verified-binaries mode')
     if not 1 <= args.ssh_port <= 65535:
         parser.error('--ssh-port must be between 1 and 65535')
+    acceleration = verify_acceleration(args.acceleration)
     source_inputs = capture_source_inputs(args.allow_dirty)
     image = args.image.resolve()
     manifest = image.parent / "SHA256SUMS"
@@ -360,6 +394,7 @@ def main():
     status = {"state": "preparing", "image_sha256": digest, "started_unix": time.time(),
               "limits": {"disk_gib": 8, "ram_mib": 2048, "vcpus": 2}, "checks": {},
               "release_source_clean": not args.allow_dirty, 'source_inputs': source_inputs,
+              'acceleration': acceleration,
               'network_profile': network_profile, 'ssh_forward': {
                   'host': '127.0.0.1', 'port': args.ssh_port, 'guest_port': 22}}
     def save(phase):
@@ -469,7 +504,7 @@ def main():
         def start_vm():
             nonlocal process
             status.setdefault('prelaunch_inventory', []).append(prelaunch_inventory())
-            process = lifecycle.start_process(["qemu-system-x86_64", "-accel", "tcg,thread=multi", "-cpu", "max", "-smp", "2", "-m", "2048",
+            process = lifecycle.start_process(["qemu-system-x86_64", *acceleration_arguments(args.acceleration), "-cpu", "max", "-smp", "2", "-m", "2048",
                 "-drive", f"file={out / 'disk.qcow2'},format=qcow2,if=virtio,cache=none",
                 "-drive", f"file={out / 'seed.img'},format=raw,if=virtio,readonly=on",
                 *network_arguments(status['network_profile'], args.ssh_port),

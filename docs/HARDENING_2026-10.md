@@ -139,6 +139,20 @@ need not be rerun for unrelated Cairn/runtime fixes.
 
 ## Final evidence and explicit boundaries
 
+The final safety-code guest attempt completed eight integration cases before
+the unchanged 15-minute **whole-suite** watchdog expired during the final
+MongoDB case. The eight passes totalled 781.53 seconds, leaving 118.47 seconds;
+the timeout trace is retained, not a successful VM gate. Hardware KVM was then
+verified on the host with a paused diskless probe. The verifier now accepts an
+explicit `--acceleration kvm` execution profile, requiring existing device
+access and KVM API 12; denial or an unsupported device fails closed. It never
+changes device permissions or silently falls back. Default TCG behavior,
+the two-vCPU/2-GiB/8-GiB fixture limits, all nine tests and their assertions,
+the 15-minute watchdog and application deadlines remain unchanged. Acceleration
+is recorded in status. This is a verifier-only change: it must get its own
+exact-commit CI and hosted provenance, without relabelling earlier binaries or
+timed sessions. Software-emulation throughput is not a native-service SLA.
+
 Follow the [final-evidence protocol](RELEASE_CANDIDATE.md#final-evidence-protocol)
 after the last safety/helper change: complete regressions and actual
 ordinary/rootless/privileged exits; freeze clean exact sources; install a new
