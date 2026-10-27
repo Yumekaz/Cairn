@@ -1,15 +1,16 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/yumekaz/cairn/internal/daemon"
 )
 
 var daemonCmd = &cobra.Command{
@@ -73,39 +74,14 @@ var daemonStopCmd = &cobra.Command{
 		}
 		pidFile := filepath.Join(homeDir, ".cairn", "cairnd.pid")
 
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			if os.IsNotExist(err) {
+		if err := daemon.StopPIDFile(pidFile, 2*time.Second); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("no daemon PID file found at %s. Is the daemon running?", pidFile)
 			}
 			return err
 		}
-
-		pid, err := strconv.Atoi(string(data))
-		if err != nil {
-			return fmt.Errorf("invalid PID in pidfile: %w", err)
-		}
-
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			return fmt.Errorf("failed to find daemon process: %w", err)
-		}
-
-		fmt.Printf("Sending SIGTERM to cairnd (PID %d)...\n", pid)
-		if err := process.Signal(syscall.SIGTERM); err != nil {
-			return fmt.Errorf("failed to send SIGTERM: %w", err)
-		}
-
-		// Wait for process to clean up and delete PID file
-		for i := 0; i < 10; i++ {
-			if _, err := os.Stat(pidFile); os.IsNotExist(err) {
-				fmt.Println("Cairn daemon stopped successfully.")
-				return nil
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-
-		return fmt.Errorf("daemon did not stop within timeout")
+		fmt.Println("Cairn daemon stopped successfully.")
+		return nil
 	},
 }
 

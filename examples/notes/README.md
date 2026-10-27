@@ -3,8 +3,11 @@
 This real HTTP workload accepts POST bodies and persists them on `notes-data`.
 GET returns the journal as plain text. It needs only BusyBox in the rootfs.
 It has no authentication: use only on a trusted host/network. Published ports
-may be reachable beyond localhost. A killed writer can leave `write.lock`;
-inspect the process before removing that lock.
+may be reachable beyond localhost. A successful POST flushes the journal and
+persists lock removal before acknowledging the write. An interrupted,
+unacknowledged writer can still leave `write.lock`; inspect the process and
+journal before removing it. Concurrent in-flight writes are not a transaction
+log, and an uncertain write must not be blindly replayed or unlocked.
 
 Create `notes-code` and `notes-data` using `cairn volume create`. Copy `cgi-bin/`
 to the **actual host path reported by `cairn volume inspect notes-code`**, keeping

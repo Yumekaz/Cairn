@@ -190,6 +190,27 @@ def verify_source_inputs(inputs):
             raise RuntimeError('source changed while building/capturing VM inputs: ' + repo)
 
 
+def verify_guest_data(ssh, installed_units, expected_data, clock=time.monotonic, sleep=time.sleep):
+    """Bound the entire post-SSH-readiness data probe, not each attempt anew."""
+    deadline = clock() + 60
+    last = ''
+    while clock() < deadline:
+        try:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                break
+            last = ssh('systemctl is-active ' + ' '.join(installed_units)
+                       + ' && curl --fail --silent http://127.0.0.1:8089/cgi-bin/notes', remaining)
+            if last == "active\nactive\n" + expected_data:
+                if clock() <= deadline:
+                    return
+                break
+        except Exception as exc:
+            last = str(exc)
+        sleep(max(0, min(2, deadline - clock())))
+    raise AssertionError(f'VM recovery did not restore serving data within the 60-second probe: {last}')
+
+
 class VMInterrupted(BaseException):
     """A requested runner stop, not an application failure or successful proof."""
 
@@ -566,17 +587,7 @@ def main():
             ssh(f"/home/ubuntu/.local/bin/cairn start {name}")
         expected_data = "first\n"
         def verify_data():
-            deadline = time.monotonic() + 60
-            last = ""
-            while time.monotonic() < deadline:
-                try:
-                    last = ssh("systemctl is-active " + ' '.join(installed_units) + " && curl --fail --silent http://127.0.0.1:8089/cgi-bin/notes")
-                    if last == "active\nactive\n" + expected_data:
-                        return
-                except Exception as exc:
-                    last = str(exc)
-                time.sleep(2)
-            raise AssertionError(f"VM recovery did not restore serving data: {last}")
+            verify_guest_data(ssh, installed_units, expected_data)
         verify_data()
         ssh("curl --fail --silent --show-error --data 'before-reboot' http://127.0.0.1:8089/cgi-bin/notes")
         expected_data = "first\nbefore-reboot\n"
@@ -595,7 +606,13 @@ def main():
         start_vm()
         ready(new_boot)
         verify_data()
+        # A readable journal alone misses a stale disk-backed writer lock.
+        # Prove a newly acknowledged write after crash, not just old bytes.
+        ssh("curl --fail --silent --show-error --data 'after-crash' http://127.0.0.1:8089/cgi-bin/notes")
+        expected_data += 'after-crash\n'
+        verify_data()
         status["checks"]["abrupt_vm_shutdown"] = "passed"
+        status['post_crash_write_verified'] = True
         status["limitations"] = "QEMU SIGKILL is an abrupt guest shutdown, not proof against every physical disk or power failure."
         (out / "guest-journal.log").write_text(ssh("sudo journalctl -u " + ' -u '.join(installed_units) + " --no-pager -n 250"))
 

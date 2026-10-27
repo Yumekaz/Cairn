@@ -108,8 +108,10 @@ Keep a failed TCG timing attempt separate from a later KVM result.
    warning. Preserve prior packages, configuration backups and failed evidence.
 4. Use a new named, bounded VM attempt with exact source/artifact provenance.
    Require all nine integration cases without skips, installation and retained
-   data, guest reboot, owned-QEMU abrupt shutdown, terminal passed status and
-   actual owner exit 0. Retain each earlier failed/interrupted status and source
+   data, guest reboot, owned-QEMU abrupt shutdown, **a newly acknowledged write
+   and exact readback after crash**, terminal passed status and a durable actual
+   owner exit 0 receipt. A transient unit's default inactive/exit-zero fields
+   after garbage collection are not a retained raw exit. Retain each earlier failed/interrupted status and source
    archive. Verify dashboard lifecycle/restore/rollback and the warning's event
    metadata/polling with backend data assertions, sandbox enabled, cleanup and
    actual browser-wrapper exit 0; the baseline's 15+4 checks are not a replay

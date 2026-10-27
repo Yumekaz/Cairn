@@ -99,6 +99,57 @@ closeout directory and `validation-runs/stop-remove-final-root-20261027.{log,xml
 These local results do not replace final exact-commit CI, installed/guest or
 hosted-session gates.
 
+## Acknowledged notes-write crash boundary
+
+A later exact-source guest check exposed an application-fixture bug: the notes
+CGI printed `201 Created` before its `EXIT` trap removed the persistent
+`write.lock` directory. Immediate guest death after that response preserved
+the journal but stranded the lock; GET still worked while the next POST
+returned 503. The failure, lock inode/timestamps and raw verifier exit 1 are
+retained in the October closeout record. A readable journal is not proof of
+continued write availability.
+
+The example now flushes the journal, disarms the cleanup trap, explicitly
+removes the owned lock, flushes its parent directory and only then acknowledges
+success. Release or flush failure returns 500, not a durable success. Disarming
+before release also prevents an ambiguous release failure from deleting a
+successor's lock. Deterministic regressions preserve failing-before evidence;
+an actual BusyBox post-ACK process-kill/next-write check passed ten repetitions.
+The guest verifier now requires a new acknowledged POST and exact readback
+after abrupt recovery, with a hard whole-probe 60-second data budget rather
+than a fresh 60-second allowance per retry.
+
+This does not make the example a transactional database. A killed,
+unacknowledged writer or a concurrent in-flight writer can leave uncertain data
+or a lock requiring inspection. No stale lock is automatically removed and no
+uncertain write is blindly retried. These source changes require new affected
+CI, installed, guest and independently recorded hosted-session evidence; older
+688/CDC sessions cannot be relabelled as this repair.
+
+## Daemon PID-file ownership
+
+PID text is not process identity: after a reboot, the same number may belong
+to an unrelated process. The daemon now holds a nonblocking kernel `flock` on
+the canonical regular PID-file inode for its lifetime. An unowned stale PID
+does not prevent startup; a competing real owner does. Release closes the
+descriptor without unlinking the inode, so an already-open contender cannot
+lock an abandoned file while another daemon locks a replacement.
+
+CLI daemon Stop must prove the PID owns that exact exclusive inode lock and
+pin the process with a Linux pidfd before signalling. An arbitrary live PID,
+another inode's lock, symlink, replaced path or unavailable identity proof is
+not accepted. The Stop wait uses lock release, not pathname disappearance.
+The PID file may remain after shutdown; its presence is not a running-daemon
+check. The data directory must remain trusted and owner-controlled. A new CLI
+refuses to infer ownership of a legacy, unlocked daemon; use the managed
+installation/service workflow to upgrade it, not a guessed numeric signal.
+
+Focused regressions use only explicitly spawned helper children and private
+directories. They cover stale live PIDs, real exclusion, canonical-inode
+retention, concurrency, symlinks and wrong-owner Stop refusal. The guest's
+historical PID-reuse log is retained separately; exact causation of that
+transient startup delay was not established from the lost live process state.
+
 ## Retained baseline evidence
 
 | Gate | Completed baseline evidence and limits |

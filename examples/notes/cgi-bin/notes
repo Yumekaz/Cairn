@@ -12,6 +12,12 @@ case "$REQUEST_METHOD" in
     # Flush this journal and its directory entry, not every host filesystem.
     # A failed flush is an indeterminate write, never a successful durable ACK.
     if ! sync /data/notes.txt /data; then printf 'Status: 500 Sync Failed\r\n\r\n'; exit 0; fi
+    # Acknowledged idle writes must not strand the persistent lock on a crash.
+    # EXIT traps run after stdout can reach the client, so release and persist
+    # the directory removal before emitting the success response.
+    trap - EXIT
+    if ! rmdir /data/write.lock; then printf 'Status: 500 Lock Release Failed\r\n\r\n'; exit 0; fi
+    if ! sync /data; then printf 'Status: 500 Lock Sync Failed\r\n\r\n'; exit 0; fi
     printf 'Status: 201 Created\r\nContent-Type: text/plain\r\n\r\nSaved\n' ;;
   *) printf 'Status: 405 Method Not Allowed\r\n\r\n' ;;
 esac

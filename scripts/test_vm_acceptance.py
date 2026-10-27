@@ -14,6 +14,73 @@ from types import SimpleNamespace
 import vm_acceptance as vm
 
 
+class GuestDataDeadlineTests(unittest.TestCase):
+    class Clock:
+        now = 0
+
+        def clock(self):
+            return self.now
+
+        def sleep(self, duration):
+            if not 0 <= duration <= 2:
+                raise AssertionError('sleep exceeds remaining bounded probe')
+            self.now += duration
+
+    def test_success_inside_whole_probe_deadline(self):
+        clock = self.Clock()
+        calls = []
+        def probe(command, timeout):
+            calls.append(timeout)
+            clock.now += 59.5
+            return 'active\nactive\nfirst\n'
+        vm.verify_guest_data(probe, ['cairn.service', 'cairn-runtime.service'], 'first\n', clock.clock, clock.sleep)
+        self.assertEqual(calls, [60])
+
+    def test_late_exact_success_is_rejected(self):
+        clock = self.Clock()
+        def probe(command, timeout):
+            self.assertEqual(timeout, 60)
+            clock.now += 61
+            return 'active\nactive\nfirst\n'
+        with self.assertRaisesRegex(AssertionError, '60-second'):
+            vm.verify_guest_data(probe, ['cairn.service', 'cairn-runtime.service'], 'first\n', clock.clock, clock.sleep)
+
+    def test_retry_receives_only_remaining_budget(self):
+        clock = self.Clock()
+        calls = []
+        def probe(command, timeout):
+            calls.append(timeout)
+            if len(calls) == 1:
+                clock.now += 57
+                raise OSError('not ready')
+            clock.now += .5
+            return 'active\nactive\nfirst\n'
+        vm.verify_guest_data(probe, ['cairn.service', 'cairn-runtime.service'], 'first\n', clock.clock, clock.sleep)
+        self.assertEqual(calls, [60, 1])
+
+    def test_wrong_data_exhausts_original_budget_without_new_full_timeout(self):
+        clock = self.Clock()
+        calls = []
+        def probe(command, timeout):
+            calls.append(timeout)
+            clock.now += 59
+            return 'active\nactive\nwrong\n'
+        with self.assertRaisesRegex(AssertionError, '60-second'):
+            vm.verify_guest_data(probe, ['cairn.service', 'cairn-runtime.service'], 'first\n', clock.clock, clock.sleep)
+        self.assertEqual(calls, [60])
+        self.assertEqual(clock.now, 60)
+
+    def test_crash_pass_requires_new_acknowledged_post_and_exact_readback(self):
+        source = Path(vm.__file__).read_text()
+        kill = source.index('process.kill(); process.wait(timeout=10)')
+        post = source.index("--data 'after-crash'", kill)
+        readback = source.index('verify_data()', post)
+        passed = source.index('status["checks"]["abrupt_vm_shutdown"] = "passed"', readback)
+        self.assertLess(kill, post)
+        self.assertLess(post, readback)
+        self.assertLess(readback, passed)
+
+
 class AccelerationTests(unittest.TestCase):
     def test_tcg_default_is_unchanged_and_does_not_probe_devices(self):
         self.assertEqual(vm.acceleration_arguments('tcg'), ['-accel', 'tcg,thread=multi'])
@@ -302,7 +369,7 @@ class NetworkSeedTests(unittest.TestCase):
                          'status["checks"]["fresh_install"] = "passed"',
                          'status["checks"]["guest_reboot"] = "passed"',
                          'status["checks"]["abrupt_vm_shutdown"] = "passed"',
-                         'if last == "active\\nactive\\n" + expected_data:',
+                         'verify_guest_data(ssh, installed_units, expected_data)',
                          'completed gates require explicit --reverify-installed',
                          'source_inputs = capture_source_inputs(args.allow_dirty)',
                          'verify_source_inputs(source_inputs)'):
