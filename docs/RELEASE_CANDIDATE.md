@@ -1,5 +1,24 @@
 # Release-candidate validation
 
+Updated 27 October 2026. This protocol separates the passed frozen baseline
+from the StopACK, restore, deletion and runtime-cleanup repair. The
+[hardening record](HARDENING_2026-10.md) records provenance; acceptance of the
+commit containing this document requires the exact-source gates below. Older
+baseline results alone never establish release closeout.
+
+Frozen Cairn `9126ce1e1bf3c2f21b508720ed2b400fda4703e2` with Mini-Docker
+`bf1f63f44f09f90e0209a74e1eed1a5da88bdb1a` passed all nine guest integration
+cases, installed-data checks, guest reboot and owned-QEMU abrupt shutdown;
+the owner exited 0. See the retained
+[VM status](../validation-vms/hardening-release-20261026/status.json) and
+[attempt log](../validation-runs/hardening-metadata-vm-resume-20261027.log).
+Those results predate the new safety changes. Hosted run
+[40431200938](https://github.com/Yumekaz/Cairn/actions/runs/40431200938) was
+completed both independently validated two-hour sessions on that same baseline;
+it cannot prove the later code. Local evidence links require the retained
+validation directories; they are not a promise that ignored artifacts are
+published in GitHub.
+
 The dependency pair is fixed by `stack.lock`; the Cairn commit containing it
 identifies the complete source set. Run `bash scripts/verify_stack.sh` before
 collecting evidence. Bootstrap checks existing siblings without changing them;
@@ -44,13 +63,89 @@ an occupied port (`NOTES_PROOF_PORT` overrides it). Run on a trusted test host.
 
 ## Remaining release gates
 
-Do not declare a production release solely from these tests. Record a fresh
-Linux installation and host reboot recovery. A clean checkout on the development host is not a fresh VM. This host
-has no available QEMU/KVM setup; rebooting it would interrupt unrelated work.
-Use a disposable Linux VM for host boot testing. External users and sustained
-operation are additional evidence, not something a one-off smoke run establishes.
+The September statement that this host had no QEMU/KVM setup is historical,
+not a current limitation. QEMU guest installation/reboot/abrupt-shutdown proof
+now exists for the frozen baseline linked above. Reusing an existing guest is
+not a newly pristine operating-system installation. Never reboot the real host
+as a verification shortcut; QEMU SIGKILL does not test every physical disk,
+controller or power-loss failure.
 
-## Current evidence
+The new safety implementation requires its own evidence. Its supported storage
+scope is one exclusive recorded service owner per volume, with no untracked
+external writers. Exclusive-owner enforcement and atomic admission of
+restore/deploy/backup workflows are still being completed and verified; neither
+the baseline nor a process-local lock establishes globally atomic storage.
+
+### Final-evidence protocol
+
+1. Finish the safety implementation and review its failure paths. Retain
+   failing-before/passing-after StopACK, idempotent Stop, cleanup-retention,
+   physical-restore replay, desired-stopped, deletion/job-admission,
+   exclusive-volume-owner and workflow-admission regressions. Include detached
+   CLI capture-pipe and attached-control cases. Run the complete relevant
+   Cairn/runtime suites, lint/vet, race checks and all real privileged cases
+   without skips after the **last** runtime/helper change; intermediate counts
+   are not final results. Record actual command exits and an owned rootless
+   Start/readiness/Stop/repeated-Stop/Remove proof with unchanged terminal data.
+2. Freeze clean source revisions for all six repositories, update the runtime
+   pin, and retain exact 40-character commits, raw working-tree status, relevant
+   diffs and artifact hashes. Evidence must name the commit that was tested,
+   not require this document to contain its own eventual commit hash.
+   Documentation-only follow-ups need an explicit source-equivalence record;
+   they must not relabel a binary built from an earlier commit.
+3. Build and checksum a new package from that frozen source set. Record the
+   manifest digest and actual installed revisions. Verify authenticated admin,
+   notes write/restart/redeploy/backup/restore, both daemon-restart PID/data
+   checks, CLI refusal/retry behavior and the new durable
+   [`RuntimeCleanupFailed`](events.md#runtime-cleanup-warning-and-uncertainty)
+   warning. Preserve prior packages, configuration backups and failed evidence.
+4. Use a new named, bounded VM attempt with exact source/artifact provenance.
+   Require all nine integration cases without skips, installation and retained
+   data, guest reboot, owned-QEMU abrupt shutdown, terminal passed status and
+   actual owner exit 0. Retain each earlier failed/interrupted status and source
+   archive. Verify dashboard lifecycle/restore/rollback and the warning's event
+   metadata/polling with backend data assertions, sandbox enabled, cleanup and
+   actual browser-wrapper exit 0; the baseline's 15+4 checks are not a replay
+   of the new code.
+5. Run two separately recorded 7200-second sessions on independent standard
+   GitHub-hosted Linux runners using the new frozen implementation. Use the
+   opt-in `bounded-soaks` workflow (manual dispatch or an intentionally pushed
+   `codex/hosted-soaks-*` acceptance branch); ordinary main CI is separate.
+   Do not count short smokes, interrupted durations, or baseline run
+   `40431200938`. Require successful terminal jobs, each sampler's actual exit
+   0, a post-target terminal sample, full retained samples/resources, zero
+   errors/unexpected controller/runtime/workload restarts, verified final
+   restoration, exact six-repository clean-source checks, actual backend
+   fixture-stop proof and marked-unit cleanup. Preserve failed attempts; no
+   automatic retries or summing durations.
+6. Download and checksum the allowlisted non-secret evidence for both jobs.
+   Run `scripts/verify_soak_session.py --status <session-status.json>
+   --expected-revisions <six-commit-map.json>` separately for each, with all
+   six exact frozen SHAs. Require `verified.json`, `sampler.exit-status` equal
+   to 0, `fixture-cleanup.json` proving stopped/PID 0, and successful
+   `cleanup.txt`; a GitHub success badge alone is insufficient. Then capture
+   every final pushed head's required GitHub checks, including Cairn race,
+   stateful spine, real PostgreSQL/Redis/MongoDB recovery and package jobs.
+
+From the frozen checkout, use a **new, nonexistent output directory** for each
+snapshot, for example:
+
+```sh
+python3 scripts/github_ci_snapshot.py --require-hosted-soaks --output validation-runs/github-release-final
+```
+
+This command reads the actual six local heads and requires completed successful
+`bounded-soaks` on the exact Cairn commit. It does not replace per-artifact
+validation or the native/VM/dashboard gates. Pending, missing, failed, skipped
+or unverified required evidence stays non-green. A later source change requires
+new affected evidence. Unchanged DuraFlow, FailForge, MiniDB and Coordination
+results remain scoped to their recorded revisions; their completed campaigns
+need not be repeated for unrelated controller/runtime repairs.
+
+## Historical evidence — September 2026
+
+The observations below retain their original dates, revisions and limitations.
+They are not proof for the October safety changes.
 
 The recovery endpoint and isolated SIGKILL tests pass, as do the Cairn internal
 Go packages and shell/Python syntax checks. The isolated backup test observed
@@ -82,7 +177,7 @@ the proof; volume `notes-proof-62a235f5-data` and backup
 `9d3b6e39-9aac-42c7-963c-bc5fe6105791` were retained for inspection. The journal
 contained both notes after restart and redeploy, and only the first after restore.
 
-## Complete matrix observation (2026-09-16)
+## Historical complete matrix observation (2026-09-16)
 
 On Cairn `ce88d200368a4bcbcf7bf211fb4c4b7f3e03be27` with the locked siblings,
 the full `prove_mlp.sh` invocation reported green core/stability checks, clean
@@ -99,4 +194,6 @@ is retained in [migration-and-backup.txt](validation/release-20260916/migration-
 
 For future runs, set `LOG_DIR` to a persistent evidence directory. Runtime startup
 now appends to its log instead of truncating prior matrix output on restart.
-Fresh-VM boot/reboot and sustained-operation validation remain outstanding.
+At that September checkpoint, fresh-VM boot/reboot and sustained-operation
+validation were outstanding. Use the [October hardening record](HARDENING_2026-10.md)
+for the completed frozen-baseline guest proof and the still-open final gates.

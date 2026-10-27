@@ -2,10 +2,14 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/yumekaz/cairn/internal/api"
 )
+
+// ErrWorkflowConflict means no new workflow was persisted or scheduled.
+var ErrWorkflowConflict = errors.New("restore conflicts with active workflow work; wait for completion")
 
 // CreateWorkflow inserts a new workflow record.
 func (s *Store) CreateWorkflow(w *api.Workflow) error {
@@ -14,9 +18,25 @@ func (s *Store) CreateWorkflow(w *api.Workflow) error {
 
 	query := `
 		INSERT INTO duraflow_workflows (id, type, status, current_step_index, input_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, w.ID, w.Type, w.Status, w.CurrentStepIndex, w.InputJSON, w.CreatedAt, w.UpdatedAt)
-	return err
+		SELECT ?, ?, ?, ?, ?, ?, ?
+		WHERE ? NOT IN ('pending', 'running') OR NOT EXISTS (
+			SELECT 1 FROM duraflow_workflows
+			WHERE status IN ('pending', 'running') AND (? = 'restore' OR type = 'restore')
+		)`
+	// One SQLite write statement is the reservation boundary, including across
+	// independent Store connections. A separate read followed by insert races.
+	result, err := s.db.Exec(query, w.ID, w.Type, w.Status, w.CurrentStepIndex, w.InputJSON, w.CreatedAt, w.UpdatedAt, w.Status, w.Type)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrWorkflowConflict
+	}
+	return nil
 }
 
 // UpdateWorkflow updates an existing workflow.

@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Yumekaz/Mini-Docker
-          ref: bf1f63f44f09f90e0209a74e1eed1a5da88bdb1a
+          ref: 958097ab6293d10f96267ce2baece1289e7a103b
           path: Mini-Docker
           persist-credentials: false
       - uses: actions/checkout@v4

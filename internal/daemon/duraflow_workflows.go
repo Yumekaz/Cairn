@@ -478,8 +478,7 @@ func (s *Server) execDeployRunHealthCheck(ctx *duraflow.StepContext) error {
 				return err
 			}
 			logs := s.getContainerLogs(ctx.Context, candidateID)
-			s.runtime.StopContainer(ctx.Context, candidateID)
-			s.runtime.RemoveContainer(ctx.Context, candidateID)
+			_ = s.retireDeployRuntime(ctx.Context, svc, deploy, candidateID)
 			_ = s.store.CreateEvent(&api.Event{
 				ID:        uuid.New().String(),
 				ServiceID: &svc.ID,
@@ -521,9 +520,22 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 	}
 
 	if cfg.Kind == "cron" {
+		persisted, err := s.store.GetService(svc.ID)
+		if err != nil {
+			return fmt.Errorf("load cron cutover owner: %w", err)
+		}
+		if current, err := s.store.GetDeploy(deploy.ID); err != nil {
+			return err
+		} else if current != nil && current.Status == "success" && persisted != nil && persisted.CurrentDeployID == deploy.ID {
+			// The commit can precede the durable step acknowledgement. Do not
+			// retire an already removed runtime or undo a later operator Stop.
+			return nil
+		}
 		if previousRuntimeID != "" {
-			_ = s.runtime.StopContainer(ctx.Context, previousRuntimeID)
-			_ = s.runtime.RemoveContainer(ctx.Context, previousRuntimeID)
+			if err := s.retirePreviousCronRuntime(ctx.Context, svc, deploy, previousRuntimeID); err != nil {
+				s.failDeploy(deploy, svc, err.Error())
+				return err
+			}
 		}
 
 		cronJob := &api.CronJob{
@@ -546,6 +558,7 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 		_ = s.store.UpdateDeploy(deploy)
 
 		svc.RuntimeID = ""
+		svc.Kind = cfg.Kind
 		svc.DesiredState = "active"
 		svc.ActualState = "active"
 		svc.CurrentDeployID = deploymeta.AfterSuccess(deploy.ID)
@@ -613,8 +626,7 @@ func (s *Server) execDeployRouteTrafficAndCleanup(ctx *duraflow.StepContext) err
 
 	// Best-effort cleanup of previous runtime (after metadata commit).
 	if previousRuntimeID != "" && previousRuntimeID != candidateID {
-		_ = s.runtime.StopContainer(ctx.Context, previousRuntimeID)
-		_ = s.runtime.RemoveContainer(ctx.Context, previousRuntimeID)
+		_ = s.retireDeployRuntime(ctx.Context, dbSvc, deploy, previousRuntimeID)
 	}
 
 	candidateName := fmt.Sprintf("cairn-%s-%s", dbSvc.Name, deployID[:8])
@@ -822,6 +834,8 @@ func (s *Server) execBackupRun(ctx *duraflow.StepContext) error {
 func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
+	cronTaskAdmissionMu.Lock()
+	defer cronTaskAdmissionMu.Unlock()
 	input, err := decodeRestoreInput(ctx.InputJSON)
 	if err != nil {
 		return err
@@ -856,19 +870,24 @@ func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 
 	if vol.AttachedServiceID != "" {
 		service, err := s.store.GetService(vol.AttachedServiceID)
-		if err == nil && service != nil {
-			dbType = service.Kind
-			if dbType == "postgres" || dbType == "mongodb" {
-				// Keep database container running for logical restore commands
-			} else if service.ActualState == "running" && service.RuntimeID != "" {
-				serviceRunning = true
-				if err := s.runtime.StopContainer(ctx.Context, service.RuntimeID); err != nil {
-					return fmt.Errorf("failed to stop service container: %w", err)
-				}
+		if err != nil {
+			return fmt.Errorf("load volume owner: %w", err)
+		}
+		if service == nil {
+			return fmt.Errorf("volume owner is missing")
+		}
+		dbType = service.Kind
+		if dbType != "postgres" && dbType != "mongodb" {
+			if _, err := s.quiesceVolumeOwner(ctx.Context, vol); err != nil {
+				return err
 			}
+			serviceRunning = service.DesiredState == "running"
 		}
 	}
 
+	if ctx.State == nil {
+		ctx.State = make(map[string]string)
+	}
 	ctx.State["db_type"] = dbType
 	ctx.State["service_running"] = fmt.Sprintf("%v", serviceRunning)
 	return nil
@@ -877,6 +896,8 @@ func (s *Server) execRestoreStopContainer(ctx *duraflow.StepContext) error {
 func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
+	cronTaskAdmissionMu.Lock()
+	defer cronTaskAdmissionMu.Unlock()
 	input, err := decodeRestoreInput(ctx.InputJSON)
 	if err != nil {
 		return err
@@ -886,20 +907,35 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 	if err != nil {
 		return err
 	}
+	if vol == nil {
+		return fmt.Errorf("volume not found: %s", input.VolumeName)
+	}
 
 	backup, err := s.store.GetBackup(input.BackupID)
 	if err != nil {
 		return err
 	}
+	if backup == nil || backup.VolumeID != vol.ID {
+		return fmt.Errorf("backup does not exist or does not belong to volume")
+	}
 
-	dbType := ctx.State["db_type"]
-	isLogicalRestore := dbType == "postgres" || dbType == "mongodb"
-	serviceRunning := ctx.State["service_running"] == "true"
-
+	var dbType string
 	var service *api.Service
 	if vol.AttachedServiceID != "" {
-		service, _ = s.store.GetService(vol.AttachedServiceID)
+		service, err = s.store.GetService(vol.AttachedServiceID)
+		if err != nil {
+			return fmt.Errorf("load volume owner: %w", err)
+		}
+		if service == nil {
+			return fmt.Errorf("volume owner is missing")
+		}
+		dbType = service.Kind
 	}
+	if ctx.State == nil {
+		ctx.State = make(map[string]string)
+	}
+	ctx.State["db_type"] = dbType
+	isLogicalRestore := dbType == "postgres" || dbType == "mongodb"
 
 	if isLogicalRestore {
 		if service == nil || service.RuntimeID == "" {
@@ -955,12 +991,27 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 		return nil
 	}
 
+	// A durable step may replay without its old in-memory state. Re-establish
+	// authoritative quiescence immediately before changing any data, even when
+	// the earlier stop step succeeded or cached ActualState says "stopped".
+	service, err = s.quiesceVolumeOwner(ctx.Context, vol)
+	if err != nil {
+		return err
+	}
+	serviceRunning := service != nil && service.DesiredState == "running"
+	ctx.State["service_running"] = fmt.Sprintf("%v", serviceRunning)
+	restartOnFailure := func() {
+		if serviceRunning {
+			if err := s.restartPhysicalRestoreOwner(ctx, vol); err != nil {
+				log.Printf("cairnd: restore failure restart refused: %v", err)
+			}
+		}
+	}
+
 	tempPath := vol.HostPath + ".tmp_restore_bak"
 	if _, err := os.Stat(vol.HostPath); err == nil {
 		if err := os.Rename(vol.HostPath, tempPath); err != nil {
-			if serviceRunning && service != nil {
-				_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
-			}
+			restartOnFailure()
 			return fmt.Errorf("failed to move volume directory to safety: %w", err)
 		}
 	}
@@ -968,17 +1019,13 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 	calcSum, err := ComputeFileSha256(backup.BackupPath)
 	if err != nil {
 		s.restoreRollback(vol.HostPath, tempPath)
-		if serviceRunning && service != nil {
-			_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
-		}
+		restartOnFailure()
 		return fmt.Errorf("failed to compute checksum: %w", err)
 	}
 
 	if calcSum != backup.Checksum {
 		s.restoreRollback(vol.HostPath, tempPath)
-		if serviceRunning && service != nil {
-			_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
-		}
+		restartOnFailure()
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", backup.Checksum, calcSum)
 	}
 
@@ -986,17 +1033,13 @@ func (s *Server) execRestoreVerifyAndExtract(ctx *duraflow.StepContext) error {
 		_ = os.MkdirAll(vol.HostPath, 0755)
 		if err := DecompressGzipToFile(backup.BackupPath, filepath.Join(vol.HostPath, "dump.rdb")); err != nil {
 			s.restoreRollback(vol.HostPath, tempPath)
-			if serviceRunning && service != nil {
-				_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
-			}
+			restartOnFailure()
 			return fmt.Errorf("failed to decompress Redis rdb: %w", err)
 		}
 	} else {
 		if err := ExtractTarGz(backup.BackupPath, vol.HostPath); err != nil {
 			s.restoreRollback(vol.HostPath, tempPath)
-			if serviceRunning && service != nil {
-				_ = s.runtime.StartContainer(ctx.Context, service.RuntimeID)
-			}
+			restartOnFailure()
 			return fmt.Errorf("failed to extract tarball: %w", err)
 		}
 	}
@@ -1019,10 +1062,16 @@ func (s *Server) execRestoreStartContainer(ctx *duraflow.StepContext) error {
 	if err != nil {
 		return err
 	}
+	if vol == nil {
+		return fmt.Errorf("volume not found: %s", input.VolumeName)
+	}
 
 	backup, err := s.store.GetBackup(input.BackupID)
 	if err != nil {
 		return err
+	}
+	if backup == nil || backup.VolumeID != vol.ID {
+		return fmt.Errorf("backup does not exist or does not belong to volume")
 	}
 
 	dbType := ctx.State["db_type"]
@@ -1034,11 +1083,8 @@ func (s *Server) execRestoreStartContainer(ctx *duraflow.StepContext) error {
 	}
 
 	if serviceRunning && vol.AttachedServiceID != "" {
-		service, err := s.store.GetService(vol.AttachedServiceID)
-		if err == nil && service != nil && service.RuntimeID != "" {
-			if err := s.runtime.StartContainer(ctx.Context, service.RuntimeID); err != nil {
-				return fmt.Errorf("restore succeeded but failed to restart service: %w", err)
-			}
+		if err := s.restartPhysicalRestoreOwner(ctx, vol); err != nil {
+			return fmt.Errorf("restore succeeded but failed to restart service: %w", err)
 		}
 	}
 

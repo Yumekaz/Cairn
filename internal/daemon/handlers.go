@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -227,6 +228,20 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Volumes have one recorded owner. Never silently reattach a live owner's
+	// volume, since later Stop/restore could otherwise overlook that writer.
+	for _, volume := range cfg.Volumes {
+		owned, err := s.store.GetVolumeByName(volume.Name)
+		if err != nil {
+			s.error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if owned != nil && owned.AttachedServiceID != "" && owned.AttachedServiceID != svc.ID {
+			s.error(w, http.StatusConflict, store.ErrVolumeOwned.Error())
+			return
+		}
+	}
+
 	// Capture last known-good deploy before creating a candidate. The candidate
 	// must not become current_deploy_id until the workflow succeeds.
 	lastSuccessfulDeployID := svc.CurrentDeployID
@@ -401,6 +416,11 @@ func (s *Server) runDeployWorkflowSync(ctx context.Context, cfg *api.ServiceConf
 
 	_, err := s.runWorkflowSync(ctx, "deploy", input)
 	if err != nil {
+		if errors.Is(err, store.ErrWorkflowConflict) {
+			// This typed conflict guarantees that no workflow was inserted or
+			// scheduled, unlike cancellation or an ambiguous scheduling error.
+			s.failDeploy(deploy, svc, err.Error())
+		}
 		return nil, err
 	}
 
@@ -1251,15 +1271,47 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if svc.RuntimeID != "" {
-		if err := s.runtime.RemoveContainer(r.Context(), svc.RuntimeID); err != nil {
-			// Don't block delete if container was already cleaned up
-			s.store.CreateEvent(&api.Event{
-				ID:        uuid.New().String(),
-				ServiceID: &svc.ID,
-				Type:      events.ServiceRemoved.String(),
-				Message:   fmt.Sprintf("Warning: failed to remove runtime container: %v", err),
-			})
+	// All task admission, including non-cron services and explicit one-offs,
+	// must publish its job ownership before deletion can inspect or remove it.
+	cronTaskAdmissionMu.Lock()
+	defer cronTaskAdmissionMu.Unlock()
+	if err := s.requireCompletedServiceJobs(svc.ID); err != nil {
+		s.error(w, http.StatusConflict, "cannot remove service: "+err.Error()+"; wait for job completion")
+		return
+	}
+
+	active, err := s.store.ServiceHasActiveDeploy(svc.ID)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, "failed to verify deployment ownership: "+err.Error())
+		return
+	}
+	reserved, err := writerJobRestoreReservation(s.store)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if active || reserved {
+		s.error(w, http.StatusConflict, "cannot remove service during deployment or restore work")
+		return
+	}
+	// Confirmed absence makes replay after a completed Remove safe; an unknown
+	// inventory is not absence. Never leave historical writers untracked after
+	// deleting their persisted deployment/job ownership records.
+	ids, err := s.ownedServiceRuntimeIDs(r.Context(), svc, false)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, id := range ids {
+		if err := s.runtime.StopContainer(r.Context(), id); err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to stop container before removal: "+err.Error())
+			return
+		}
+	}
+	for i := len(ids) - 1; i >= 0; i-- {
+		if err := s.runtime.RemoveContainer(r.Context(), ids[i]); err != nil {
+			s.error(w, http.StatusInternalServerError, "failed to remove container: "+err.Error())
+			return
 		}
 	}
 
@@ -1699,6 +1751,30 @@ type RunOneOffRequest struct {
 
 func (s *Server) handleRunOneOff(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	var req RunOneOffRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.error(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Command == "" {
+		s.error(w, http.StatusBadRequest, "command is required")
+		return
+	}
+
+	// Hold lifecycle then admission only through durable job registration and
+	// Start acknowledgement. Job execution and log streaming must not hold them.
+	s.lifecycleMu.Lock()
+	cronTaskAdmissionMu.Lock()
+	admissionHeld := true
+	releaseAdmission := func() {
+		if admissionHeld {
+			admissionHeld = false
+			cronTaskAdmissionMu.Unlock()
+			s.lifecycleMu.Unlock()
+		}
+	}
+	defer releaseAdmission()
+
 	svc, err := s.store.GetServiceByName(name)
 	if err != nil {
 		s.error(w, http.StatusInternalServerError, err.Error())
@@ -1709,14 +1785,13 @@ func (s *Server) handleRunOneOff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req RunOneOffRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.error(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+	reserved, err := writerJobRestoreReservation(s.store)
+	if err != nil {
+		s.error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	if req.Command == "" {
-		s.error(w, http.StatusBadRequest, "command is required")
+	if reserved {
+		s.error(w, http.StatusConflict, "cannot admit one-off writer job while a restore workflow is pending or running")
 		return
 	}
 
@@ -1799,6 +1874,7 @@ func (s *Server) handleRunOneOff(w http.ResponseWriter, r *http.Request) {
 		s.error(w, http.StatusInternalServerError, "failed to start task container: "+err.Error())
 		return
 	}
+	releaseAdmission()
 
 	// Stream logs
 	stream, err := s.runtime.StreamLogs(r.Context(), containerID, true, 0)

@@ -29,6 +29,7 @@ const (
 	// Runtime / health / routing (MLP §17)
 	RuntimeCreateStarted   EventType = "RuntimeCreateStarted"
 	RuntimeCreateCompleted EventType = "RuntimeCreateCompleted"
+	RuntimeCleanupFailed   EventType = "RuntimeCleanupFailed"
 	HealthCheckPassed      EventType = "HealthCheckPassed"
 	HealthCheckFailed      EventType = "HealthCheckFailed"
 	RouteUpdated           EventType = "RouteUpdated"
@@ -67,7 +68,7 @@ func ImplementedTypes() []EventType {
 		ServiceCreated, ServiceStarted, ServiceStopped, ServiceRestarted, ServiceRemoved,
 		DeployStarted, DeploySucceeded, DeployCompleted, DeployFailed,
 		RollbackBlocked, RollbackForced,
-		RuntimeCreateStarted, RuntimeCreateCompleted,
+		RuntimeCreateStarted, RuntimeCreateCompleted, RuntimeCleanupFailed,
 		HealthCheckPassed, HealthCheckFailed,
 		RouteUpdated, RoutePreserved,
 		VolumeCreated, VolumeAttached, VolumeRemoved,

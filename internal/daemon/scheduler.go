@@ -171,9 +171,10 @@ type Scheduler struct {
 	dataDir string
 }
 
-// Serialize cron-service Stop with task admission through Start acknowledgement,
-// not with the job's lifetime. Server lifecycle handlers take lifecycleMu first;
-// the scheduler never takes lifecycleMu. Non-cron service jobs are unaffected.
+// Serialize all writer-task admission with deletion and physical restore through
+// durable job registration and Start acknowledgement, not the job's lifetime.
+// Server lifecycle handlers take lifecycleMu first; the scheduler takes only
+// this admission mutex and must never acquire lifecycleMu while holding it.
 var cronTaskAdmissionMu sync.Mutex
 
 // NewScheduler creates a new scheduler instance.
@@ -237,6 +238,17 @@ func (s *Scheduler) runTick(ctx context.Context, now time.Time) {
 
 // ExecuteCronJob runs a cron job container, streams the logs, and stores the status in the DB.
 func (s *Scheduler) ExecuteCronJob(ctx context.Context, cj *api.CronJob) error {
+	cronTaskAdmissionMu.Lock()
+	admissionHeld := true
+	releaseAdmission := func() {
+		if admissionHeld {
+			admissionHeld = false
+			cronTaskAdmissionMu.Unlock()
+		}
+	}
+	defer releaseAdmission()
+	// A queued tick must re-read ownership under the barrier, even for an
+	// independent schedule on a non-cron service that deletion may have removed.
 	svc, err := s.store.GetService(cj.ServiceID)
 	if err != nil {
 		return fmt.Errorf("failed to get service %s: %w", cj.ServiceID, err)
@@ -245,29 +257,17 @@ func (s *Scheduler) ExecuteCronJob(ctx context.Context, cj *api.CronJob) error {
 		return fmt.Errorf("service not found for job: %s", cj.ServiceID)
 	}
 
-	releaseAdmission := func() {}
 	if svc.Kind == "cron" {
-		cronTaskAdmissionMu.Lock()
-		locked := true
-		releaseAdmission = func() {
-			if locked {
-				locked = false
-				cronTaskAdmissionMu.Unlock()
-			}
-		}
-		defer releaseAdmission()
-		// A tick may have queued this execution before Stop completed. Read
-		// intent again under the admission lock before recording any new run.
-		svc, err = s.store.GetService(cj.ServiceID)
-		if err != nil {
-			return fmt.Errorf("failed to get service %s: %w", cj.ServiceID, err)
-		}
-		if svc == nil {
-			return fmt.Errorf("service not found for job: %s", cj.ServiceID)
-		}
 		if svc.DesiredState == "stopped" {
 			return nil
 		}
+	}
+	reserved, err := writerJobRestoreReservation(s.store)
+	if err != nil {
+		return err
+	}
+	if reserved {
+		return fmt.Errorf("cannot admit scheduled writer job while a restore workflow is pending or running")
 	}
 
 	if svc.CurrentDeployID == "" {

@@ -64,6 +64,16 @@ func (r *liveDatabaseTasks) StopContainer(ctx context.Context, id string) error 
 	_, err := liveDocker(ctx, "stop", "--time", "5", id)
 	return err
 }
+func (r *liveDatabaseTasks) ListContainers(ctx context.Context) ([]*runtime.ContainerInfo, error) {
+	// This fixture owns exactly one database. Query its actual backend state;
+	// do not report a successful empty inventory to bypass restore fencing.
+	info, err := r.InspectContainer(ctx, r.database)
+	if err != nil {
+		return nil, err
+	}
+	info.ID, info.Name = r.database, r.database
+	return []*runtime.ContainerInfo{info}, nil
+}
 func (r *liveDatabaseTasks) RemoveContainer(ctx context.Context, id string) error {
 	if id == r.database {
 		return fmt.Errorf("refusing to remove the database through task cleanup")

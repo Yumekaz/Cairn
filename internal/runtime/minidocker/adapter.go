@@ -103,11 +103,9 @@ func (a *MiniDockerAdapter) StopContainer(ctx context.Context, id string) error 
 	path := fmt.Sprintf("/containers/%s/stop", id)
 	err := a.client.Post(ctx, path, nil, nil)
 	if err != nil {
-		// Fallback check: if container is actually stopped, ignore the stop error
-		inspectInfo, inspectErr := a.InspectContainer(ctx, id)
-		if inspectErr == nil && (inspectInfo.State == runtime.StateStopped || inspectInfo.State == runtime.StateError) {
-			return nil
-		}
+		// A generic stopped/error inspection cannot certify the writer fence or
+		// cleanup. Only the runtime's successful Stop acknowledgement can do so;
+		// idempotence belongs in that authoritative operation, not this fallback.
 		return fmt.Errorf("failed to stop container %s: %w", id, err)
 	}
 	return nil

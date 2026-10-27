@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,14 +14,15 @@ import (
 
 type stoppingRuntime struct {
 	runtime.RuntimeBackend
-	stopped chan struct{}
-	release chan struct{}
-	starts  atomic.Int32
+	stopped  chan struct{}
+	release  chan struct{}
+	starts   atomic.Int32
+	stopOnce sync.Once
 }
 
 func (r *stoppingRuntime) StopContainer(context.Context, string) error {
 	// Real Mini-Docker publishes stopped before its host-side NAT cleanup.
-	close(r.stopped)
+	r.stopOnce.Do(func() { close(r.stopped) })
 	<-r.release
 	return nil
 }
@@ -32,7 +34,7 @@ func (r *stoppingRuntime) StartContainer(context.Context, string) error {
 	return nil
 }
 func (r *stoppingRuntime) ListContainers(context.Context) ([]*runtime.ContainerInfo, error) {
-	return nil, nil
+	return []*runtime.ContainerInfo{{ID: "container", Name: "cairn-lifecycle-proof-container", State: runtime.StateStopped}}, nil
 }
 func (r *stoppingRuntime) RemoveContainer(ctx context.Context, id string) error {
 	return r.StopContainer(ctx, id)

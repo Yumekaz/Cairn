@@ -11,6 +11,8 @@ import (
 
 // --- Services CRUD ---
 
+var ErrVolumeOwned = errors.New("volume already belongs to another service; remove its owner safely before reattaching")
+
 // GetService retrieves a service by ID.
 func (s *Store) GetService(id string) (*api.Service, error) {
 	row := s.db.QueryRow(`
@@ -314,7 +316,7 @@ func (s *Store) UpsertVolume(v *api.Volume) error {
 		attachedSvc = v.AttachedServiceID
 	}
 
-	_, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 		INSERT INTO volumes (id, name, host_path, attached_service_id, mount_path, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -323,9 +325,21 @@ func (s *Store) UpsertVolume(v *api.Volume) error {
 			attached_service_id = excluded.attached_service_id,
 			mount_path = excluded.mount_path,
 			status = excluded.status,
-			updated_at = excluded.updated_at`,
+			updated_at = excluded.updated_at
+		WHERE COALESCE(volumes.attached_service_id, '') = ''
+		   OR volumes.attached_service_id = excluded.attached_service_id`,
 		v.ID, v.Name, v.HostPath, attachedSvc, v.MountPath, v.Status, v.CreatedAt, v.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrVolumeOwned
+	}
+	return nil
 }
 
 // DeleteVolume deletes a volume by ID.
